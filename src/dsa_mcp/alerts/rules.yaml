@@ -74,12 +74,19 @@
 
 - id: insider_reduction
   name: 大股东减持
-  description: 公告中有股东减持信息
+  description: 公告揭示大股东/董监高/控股股东减持 (排除南向资金/机构资金场景)
   severity: high
   conditions:
     - field: announcement_title
       op: any_of
-      value: ["减持", "拟减持"]
+      value: ["大股东减持", "控股股东减持", "董监高减持", "股东减持", "拟减持", "股份减持", "减持计划", "减持股份"]
+  # Phase E 优化: 排除南向资金/机构资金场景 (避免新闻误判)
+  # e.g. "南向资金减持红利资产" 含"减持"但不是公司减持公告
+  exclude_keywords:
+    - "南向资金"
+    - "机构资金"
+    - "主力资金"
+    - "北向资金"
 
 - id: earnings_warning
   name: 业绩预亏

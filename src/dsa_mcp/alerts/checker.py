@@ -173,16 +173,23 @@ def check_alert(
                     keywords.append(v)
             if not keywords:
                 continue
+            # Phase E: exclude_keywords 用于排除误判场景 (e.g. 南向资金减持)
+            exclude_keywords = arule.get("exclude_keywords") or []
             matched_anns = []
             for ann in announcements:
                 title = ann.get("title", "")
+                # 命中关键词
                 matched_kw = next((kw for kw in keywords if kw in title), None)
-                if matched_kw:
-                    matched_anns.append({
-                        "ann": ann,
-                        "kw": matched_kw,
-                        "title": title,
-                    })
+                if not matched_kw:
+                    continue
+                # 排除关键词命中 → 跳过
+                if any(ekw in title for ekw in exclude_keywords):
+                    continue
+                matched_anns.append({
+                    "ann": ann,
+                    "kw": matched_kw,
+                    "title": title,
+                })
             if not matched_anns:
                 continue
             matched_anns.sort(key=lambda x: x["ann"].get("announcement_time", ""), reverse=True)

@@ -351,3 +351,56 @@ class TestAlerts:
         ids = {r["id"] for r in ff_rules}
         assert "main_inflow_surge" in ids
         assert "main_outflow_surge" in ids
+
+    def test_insider_reduction_excludes_southbound_funds(self):
+        """Phase E: insider_reduction 排除 "南向资金" 等场景, 避免新闻误判"""
+        from dsa_mcp.alerts.checker import check_alert
+        # 真公司减持公告 → 应触发
+        ann_real = [
+            {"title": "关于大股东减持股份计划的公告", "announcement_time": "2026-07-02", "link": "http://a"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_real)
+        assert any(s["rule_id"] == "insider_reduction" for s in r["signals"])
+
+        # 南向资金场景 → 不应触发
+        ann_southbound = [
+            {"title": "南向资金减持红利资产, 美团资金流出 33.91 亿", "announcement_time": "2026-07-02", "link": "http://b"},
+            {"title": "北向资金今日净卖出, 减持金融板块", "announcement_time": "2026-07-02", "link": "http://c"},
+            {"title": "机构资金减持科技股, 主力抛售", "announcement_time": "2026-07-02", "link": "http://d"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_southbound)
+        insider_sigs = [s for s in r["signals"] if s["rule_id"] == "insider_reduction"]
+        assert len(insider_sigs) == 0, f"南向资金/北向资金/机构资金场景不应触发, got {insider_sigs}"
+
+    def test_insider_reduction_new_keywords(self):
+        """Phase E: 新关键词 "大股东减持" 等能触发, "减持" 单字已不能"""
+        from dsa_mcp.alerts.checker import check_alert
+        # "减持" 单字 (新闻标题常用) → 不应触发 (除非前面有 "大股东"/"控股股东" 等)
+        ann_loose = [
+            {"title": "南向资金减持红利资产", "announcement_time": "2026-07-02", "link": "http://x"},
+            {"title": "中概股减持", "announcement_time": "2026-07-02", "link": "http://y"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_loose)
+        insider_sigs = [s for s in r["signals"] if s["rule_id"] == "insider_reduction"]
+        assert len(insider_sigs) == 0, f"松散'减持'不应触发, got {insider_sigs}"
+
+        # "大股东减持" / "控股股东减持" → 应触发
+        ann_strict = [
+            {"title": "关于控股股东减持股份的公告", "announcement_time": "2026-07-02", "link": "http://z"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_strict)
+        assert any(s["rule_id"] == "insider_reduction" for s in r["signals"])
+
+    def test_insider_reduction_exclude_keywords_field(self):
+        """Phase E: rules.yaml insider_reduction 含 exclude_keywords 字段"""
+        import yaml
+        from pathlib import Path
+        rules_path = Path(__file__).resolve().parent.parent / "src" / "dsa_mcp" / "alerts" / "rules.yaml"
+        with open(rules_path) as f:
+            rules = yaml.safe_load(f)
+        insider = next(r for r in rules if r["id"] == "insider_reduction")
+        excl = insider.get("exclude_keywords") or []
+        assert "南向资金" in excl
+        assert "北向资金" in excl
+        assert "机构资金" in excl
+        assert "主力资金" in excl
