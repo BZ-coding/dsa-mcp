@@ -84,7 +84,7 @@ else
 fi
 
 # 6: dsa-mcp check_alert 002202 触发 main_inflow_surge
-TRIG=$(timeout 30 python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>/dev/null \
+TRIG=$(timeout 30 /home/zsd/codes/dsa-mcp/venv/bin/python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>/dev/null \
   | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -98,7 +98,7 @@ else
 fi
 
 # 7: hk03690 不触发 fund_flow 规则
-HK_FF=$(timeout 30 python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"hk03690"}' 2>/dev/null \
+HK_FF=$(timeout 30 /home/zsd/codes/dsa-mcp/venv/bin/python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"hk03690"}' 2>/dev/null \
   | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -112,7 +112,7 @@ else
 fi
 
 # 8: signal schema 检查
-SIG_SCHEMA=$(timeout 30 python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>/dev/null \
+SIG_SCHEMA=$(timeout 30 /home/zsd/codes/dsa-mcp/venv/bin/python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>/dev/null \
   | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -130,7 +130,7 @@ else
 fi
 
 # 9: 4 个 task 并行 (没有显著延迟) - 用 time 测
-PARALLEL_TIME=$(timeout 30 /usr/bin/time -f "%e" python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>&1 >/dev/null | tail -1)
+PARALLEL_TIME=$(timeout 30 /usr/bin/time -f "%e" /home/zsd/codes/dsa-mcp/venv/bin/python3 -u /home/zsd/.hermes/scripts/dsa_mcp_call.py check_alert '{"symbol":"002202"}' 2>&1 >/dev/null | tail -1)
 if [ -n "$PARALLEL_TIME" ] && [ "$(echo "$PARALLEL_TIME < 10" | bc 2>/dev/null)" = "1" ]; then
   pass "check_alert < 10s (并行 fetch OK, ${PARALLEL_TIME}s)"
 else
