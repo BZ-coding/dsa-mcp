@@ -172,21 +172,32 @@ def check_alert(
                     keywords.append(v)
             if not keywords:
                 continue
+            matched_anns = []
             for ann in announcements:
                 title = ann.get("title", "")
-                matched = next((kw for kw in keywords if kw in title), None)
-                if matched:
-                    signals.append({
-                        "rule_id": rid,
-                        "severity": severity,
-                        "name": rname,
-                        "value": matched,
-                        "reason": f"公告标题含 \"{matched}\": {title[:60]}",
-                        "source": "announcement",
-                        "link": ann.get("link"),
-                        "announcement_time": ann.get("announcement_time"),
+                matched_kw = next((kw for kw in keywords if kw in title), None)
+                if matched_kw:
+                    matched_anns.append({
+                        "ann": ann,
+                        "kw": matched_kw,
+                        "title": title,
                     })
-                    break  # 一条公告命中一条规则就够, 避免重复
+            if not matched_anns:
+                continue
+            # 按 announcement_time 倒序, 最新优先, 但最多返 3 条避免一条 sym 一推就刷屏
+            matched_anns.sort(key=lambda x: x["ann"].get("announcement_time", ""), reverse=True)
+            for m in matched_anns[:3]:
+                signals.append({
+                    "rule_id": rid,
+                    "severity": severity,
+                    "name": rname,
+                    "value": m["kw"],
+                    "reason": f"公告标题含 \"{m['kw']}\": {m['title'][:60]}",
+                    "source": "announcement",
+                    "link": m["ann"].get("link"),
+                    "announcement_time": m["ann"].get("announcement_time"),
+                    "announcement_id": m["ann"].get("id"),  # 用于 daemon 去重同一公告
+                })
 
     return {
         "symbol": symbol,

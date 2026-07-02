@@ -112,48 +112,75 @@ async def _fetch_quote(symbol: str) -> dict:
         logger.warning(f"_fetch_quote({symbol}) failed: {e}")
         return {}
 
+async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
+    """
+    Fetch company announcements from 8084 REST.
 
-async def _fetch_announcements(symbol: str, days: int = 30) -> list[dict]:
-    """Fetch company announcements from 8084 REST.
+    A 股 → /data?data_type=announcement (akshare 巨潮)
+    港股 → akshare 无公告 source, fallback 到 /data?data_type=stock_news
+           (东方财富/雪球 个股新闻; 标题当 announcement 处理)
 
     Returns list of {id, title, announcement_time, link, source}.
     Used by semantic alert rules (insider_reduction, earnings_warning,
     regulatory_penalty, lockup_expiry, major_event).
     """
     client = await _get_client()
+    is_hk = symbol.startswith("hk")
+    # 港股 akshare 无公告; A 股用 announcement; 优先按 is_hk 决定
+    primary_type = "stock_news" if is_hk else "announcement"
+
+    items: list[dict] = []
     try:
         resp = await client.get(
             f"{_FDS_REST}/api/v1/data",
             params={
                 "source": "akshare",
                 "symbol": symbol,
-                "data_type": "announcement",
+                "data_type": primary_type,
                 "fresh": "false",
             },
         )
         resp.raise_for_status()
-        payload = resp.json()
+        items = resp.json().get("items", []) or []
     except Exception as e:
-        logger.warning(f"_fetch_announcements({symbol}) failed: {e}")
-        return []
+        logger.warning(f"_fetch_announcements({symbol} primary={primary_type}) failed: {e}")
 
-    items = payload.get("items", [])
+    # A 股 announcement endpoint 可能 404 (新 symbol 还没拉过), fallback 到 stock_news
+    if not items and not is_hk:
+        try:
+            resp = await client.get(
+                f"{_FDS_REST}/api/v1/data",
+                params={
+                    "source": "akshare",
+                    "symbol": symbol,
+                    "data_type": "stock_news",
+                    "fresh": "false",
+                },
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", []) or []
+            primary_type = "stock_news"
+        except Exception as e:
+            logger.warning(f"_fetch_announcements({symbol} fallback stock_news) failed: {e}")
+
     if not items:
         return []
 
-    # Filter by recency (announcement_time within last N days)
+    # Filter by recency (time field varies: announcement_time / published)
     from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    return [
-        {
-            "id": it.get("id"),
-            "title": it.get("title", ""),
-            "announcement_time": it.get("announcement_time", ""),
-            "link": it.get("link", ""),
-        }
-        for it in items
-        if it.get("announcement_time", "") >= cutoff
-    ]
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()[:10]
+    out: list[dict] = []
+    for it in items:
+        ts = it.get("announcement_time") or it.get("published") or ""
+        if str(ts)[:10] >= cutoff:
+            out.append({
+                "id": it.get("id"),
+                "title": it.get("title", ""),
+                "announcement_time": ts,
+                "link": it.get("link", ""),
+                "source": primary_type,  # 标记 source (announcement / stock_news) 便于审计
+            })
+    return out
 
 
 # ──────────────────────────────────────────────────
