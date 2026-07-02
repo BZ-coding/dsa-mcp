@@ -215,3 +215,78 @@ class TestAlerts:
         sig_tech = {"rule_id": "ma5_below_ma20", "reason": "MA5(67) < MA20(71)"}
         v3 = mod._signal_value(sig_tech)
         assert not v3.startswith("ann:"), "价量 rule 不应该用 ann: prefix"
+
+    def test_daily_recap_load_today_signals(self):
+        """Phase B: daily_recap 从 state 抽今日 signals"""
+        from pathlib import Path
+        recap_path = Path("/home/zsd/.hermes/scripts/daily_recap.py")
+        if not recap_path.exists():
+            pytest.skip("daily_recap.py not deployed")
+        ns = {"__name__": "recap", "__file__": str(recap_path)}
+        exec(recap_path.read_text(encoding="utf-8"), ns)
+        # 模拟 state
+        fake_state = {
+            "002202": {
+                "major_event": {
+                    "ann:major_event:100": {"value": "ann:major_event:100", "severity": "medium", "pushed_at": "2026-07-02T10:30:00"},
+                    "ann:major_event:101": {"value": "ann:major_event:101", "severity": "medium", "pushed_at": "2026-07-02T10:31:00"},
+                }
+            },
+            "hk03690": {
+                "ma5_below_ma20": {
+                    "ma5_below_ma20|MA5(67.95)<MA20(71.09)": {
+                        "value": "ma5_below_ma20|MA5(67.95)<MA20(71.09)",
+                        "severity": "medium",
+                        "pushed_at": "2026-07-02T10:32:00",
+                    }
+                }
+            },
+            "hk09988": {
+                "ma5_below_ma20": {
+                    "ma5_below_ma20|MA5(92)<MA20(101)": {
+                        "value": "ma5_below_ma20|MA5(92)<MA20(101)",
+                        "severity": "medium",
+                        "pushed_at": "2026-07-01T10:32:00",  # 昨日, 不计入
+                    }
+                }
+            },
+        }
+        sigs = ns["load_today_signals"](fake_state, "2026-07-02")
+        assert len(sigs) == 3, f"expected 3, got {len(sigs)}"
+        syms = [s["sym"] for s in sigs]
+        assert "002202" in syms
+        assert "hk03690" in syms
+        assert "hk09988" not in syms, "昨日推送不应计入今日"
+
+    def test_daily_recap_format_signals_table(self):
+        """Phase B: format_signals_table 输出 md 表格"""
+        from pathlib import Path
+        recap_path = Path("/home/zsd/.hermes/scripts/daily_recap.py")
+        if not recap_path.exists():
+            pytest.skip("daily_recap.py not deployed")
+        ns = {"__name__": "recap", "__file__": str(recap_path)}
+        exec(recap_path.read_text(encoding="utf-8"), ns)
+        sigs = [
+            {"sym": "002202", "rule_id": "major_event", "severity": "medium",
+             "value": "ann:major_event:100", "pushed_at": "2026-07-02T10:30:00"},
+            {"sym": "hk03690", "rule_id": "ma5_below_ma20", "severity": "medium",
+             "value": "ma5_below_ma20|MA5(67.95)<MA20(71.09)", "pushed_at": "2026-07-02T10:32:00"},
+        ]
+        md = ns["format_signals_table"](sigs)
+        assert "| 标的 |" in md
+        assert "| 规则 |" in md
+        assert "002202" in md
+        assert "major_event" in md
+        assert "公告 #100" in md, "announcement_id 应显示为 '公告 #100'"
+        assert "MA5(67.95)<MA20(71.09)" in md
+
+    def test_daily_recap_format_signals_table_empty(self):
+        """Phase B: 空 signals 输出占位文本"""
+        from pathlib import Path
+        recap_path = Path("/home/zsd/.hermes/scripts/daily_recap.py")
+        if not recap_path.exists():
+            pytest.skip("daily_recap.py not deployed")
+        ns = {"__name__": "recap", "__file__": str(recap_path)}
+        exec(recap_path.read_text(encoding="utf-8"), ns)
+        md = ns["format_signals_table"]([])
+        assert "当日无 alert" in md or "无推送" in md
