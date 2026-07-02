@@ -78,8 +78,8 @@
   severity: high
   conditions:
     - field: announcement_title
-      op: contains
-      value: "减持"
+      op: any_of
+      value: ["减持", "拟减持"]
 
 - id: earnings_warning
   name: 业绩预亏
@@ -87,8 +87,8 @@
   severity: high
   conditions:
     - field: announcement_title
-      op: contains
-      value: "预亏"
+      op: any_of
+      value: ["预亏", "亏损", "业绩预告", "业绩预减"]
 
 - id: regulatory_penalty
   name: 监管处罚
@@ -96,8 +96,8 @@
   severity: high
   conditions:
     - field: announcement_title
-      op: contains
-      value: "处罚"
+      op: any_of
+      value: ["处罚", "警示函", "整改", "立案调查", "监管措施"]
 
 - id: lockup_expiry
   name: 解禁
@@ -105,5 +105,14 @@
   severity: high
   conditions:
     - field: announcement_title
-      op: contains
-      value: "解禁"
+      op: any_of
+      value: ["解禁", "解除限售", "限售股上市流通"]
+
+- id: major_event
+  name: 重大事件
+  description: 公告揭示重组/收购/合并/回购/股权激励/股东大会决议
+  severity: medium
+  conditions:
+    - field: announcement_title
+      op: any_of
+      value: ["重大资产重组", "收购", "合并", "股份回购", "股权激励", "股东大会决议", "停牌", "复牌", "担保"]

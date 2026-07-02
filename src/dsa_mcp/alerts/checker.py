@@ -32,6 +32,7 @@ def check_alert(
     symbol: str,
     quote: dict,
     kline_df: "pd.DataFrame | None",
+    announcements: Optional[list] = None,
     rule_id: Optional[str] = None,
 ) -> dict:
     """
@@ -41,10 +42,11 @@ def check_alert(
         symbol: Stock code
         quote: Realtime quote dict from 8084
         kline_df: OHLCV DataFrame from 8084 (can be empty)
+        announcements: List of {title, announcement_time, link} from 8084
         rule_id: If set, check only this rule. None = all.
 
     Returns:
-        {symbol, triggered, signals: [{rule_id, severity, name, value, reason}]}
+        {symbol, triggered, signals: [{rule_id, severity, name, value, reason, source, link}]}
     """
     import pandas as pd
 
@@ -143,7 +145,48 @@ def check_alert(
                 "name": rname,
                 "value": value,
                 "reason": reason,
+                "source": "technical" if current_price is not None or volume_ratio is not None else "unknown",
+                "link": None,
             })
+
+    # ── Semantic rules (announcement title matching) ──
+    _target_rule = rule_id or ""
+    ann_rules = [
+        r for r in rules
+        if any(c.get("field") == "announcement_title" for c in r.get("conditions", []))
+    ]
+    if _target_rule:
+        ann_rules = [r for r in ann_rules if r.get("id") == _target_rule]
+
+    if announcements and ann_rules:
+        for arule in ann_rules:
+            rid = arule.get("id", "")
+            rname = arule.get("name", rid)
+            severity = arule.get("severity", "low")
+            keywords = []
+            for c in arule.get("conditions", []):
+                v = c.get("value")
+                if isinstance(v, list):
+                    keywords.extend(v)
+                elif isinstance(v, str):
+                    keywords.append(v)
+            if not keywords:
+                continue
+            for ann in announcements:
+                title = ann.get("title", "")
+                matched = next((kw for kw in keywords if kw in title), None)
+                if matched:
+                    signals.append({
+                        "rule_id": rid,
+                        "severity": severity,
+                        "name": rname,
+                        "value": matched,
+                        "reason": f"公告标题含 \"{matched}\": {title[:60]}",
+                        "source": "announcement",
+                        "link": ann.get("link"),
+                        "announcement_time": ann.get("announcement_time"),
+                    })
+                    break  # 一条公告命中一条规则就够, 避免重复
 
     return {
         "symbol": symbol,

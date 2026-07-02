@@ -105,4 +105,36 @@ class TestAlerts:
         with open(rules_path) as f:
             rules = yaml.safe_load(f)
         assert isinstance(rules, list)
-        assert len(rules) == 11
+        assert len(rules) >= 12  # Phase 5b added major_event
+        # 至少 5 条语义规则 (announcement_title)
+        ann_rules = [
+            r for r in rules
+            if any(c.get("field") == "announcement_title" for c in r.get("conditions", []))
+        ]
+        assert len(ann_rules) >= 5
+
+    def test_semantic_alert_announcement_match(self):
+        """Phase 5b: checker.py 关键词匹配 announcement 标题"""
+        from dsa_mcp.alerts.checker import check_alert
+        anns = [
+            {"title": "关于公司大股东减持股份的公告", "announcement_time": "2026-07-01", "link": "http://x"},
+            {"title": "2025年年度报告", "announcement_time": "2026-07-02", "link": "http://y"},
+        ]
+        r = check_alert("000001", {}, None, announcements=anns)
+        assert r["triggered"]
+        ids = [s["rule_id"] for s in r["signals"]]
+        assert "insider_reduction" in ids
+        assert "major_event" not in ids  # 普通年报不算 major_event
+        # 验证 signal 包含 link + source
+        sig = next(s for s in r["signals"] if s["rule_id"] == "insider_reduction")
+        assert sig["source"] == "announcement"
+        assert sig["link"] == "http://x"
+
+    def test_semantic_alert_multiple_keywords(self):
+        """any_of 关键词列表匹配"""
+        from dsa_mcp.alerts.checker import check_alert
+        anns = [{"title": "公司被证监会立案调查", "announcement_time": "2026-07-02", "link": "http://z"}]
+        r = check_alert("000001", {}, None, announcements=anns)
+        assert r["triggered"]
+        ids = [s["rule_id"] for s in r["signals"]]
+        assert "regulatory_penalty" in ids

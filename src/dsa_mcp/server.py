@@ -113,6 +113,49 @@ async def _fetch_quote(symbol: str) -> dict:
         return {}
 
 
+async def _fetch_announcements(symbol: str, days: int = 30) -> list[dict]:
+    """Fetch company announcements from 8084 REST.
+
+    Returns list of {id, title, announcement_time, link, source}.
+    Used by semantic alert rules (insider_reduction, earnings_warning,
+    regulatory_penalty, lockup_expiry, major_event).
+    """
+    client = await _get_client()
+    try:
+        resp = await client.get(
+            f"{_FDS_REST}/api/v1/data",
+            params={
+                "source": "akshare",
+                "symbol": symbol,
+                "data_type": "announcement",
+                "fresh": "false",
+            },
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as e:
+        logger.warning(f"_fetch_announcements({symbol}) failed: {e}")
+        return []
+
+    items = payload.get("items", [])
+    if not items:
+        return []
+
+    # Filter by recency (announcement_time within last N days)
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    return [
+        {
+            "id": it.get("id"),
+            "title": it.get("title", ""),
+            "announcement_time": it.get("announcement_time", ""),
+            "link": it.get("link", ""),
+        }
+        for it in items
+        if it.get("announcement_time", "") >= cutoff
+    ]
+
+
 # ──────────────────────────────────────────────────
 # Import pandas lazily (heavy)
 # ──────────────────────────────────────────────────
@@ -348,12 +391,18 @@ async def call_tool(name: str, arguments: dict) -> list:
 
     if name == "check_alert":
         rule_id = arguments.get("rule_id")
-        quote = await _fetch_quote(symbol)
-        kline = await _fetch_kline(symbol, days=60)
+        # Parallel data fetch: quote + kline + announcements
+        import asyncio
+        quote_task = _fetch_quote(symbol)
+        kline_task = _fetch_kline(symbol, days=60)
+        announcements_task = _fetch_announcements(symbol, days=90)
+        quote, kline, announcements = await asyncio.gather(
+            quote_task, kline_task, announcements_task
+        )
         pd = _get_pd()
         df = pd.DataFrame(kline)
         from dsa_mcp.alerts.checker import check_alert as _check
-        result = _check(symbol, quote, df, rule_id=rule_id)
+        result = _check(symbol, quote, df, announcements=announcements, rule_id=rule_id)
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
     if name == "get_agent_prompt":
