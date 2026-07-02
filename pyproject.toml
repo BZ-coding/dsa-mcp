@@ -31,4 +31,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
+# asyncio_mode omitted: dsa-mcp tests are all synchronous. The auto mode
+# was a stub from dSA upstream that's not recognised by pytest 9.x — drop it.
