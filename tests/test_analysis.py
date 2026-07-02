@@ -404,3 +404,57 @@ class TestAlerts:
         assert "北向资金" in excl
         assert "机构资金" in excl
         assert "主力资金" in excl
+
+    # ────────────────────────────────────────────────────
+    # Phase F: exclude_keywords 扩展到 4 条 semantic rule
+    # ────────────────────────────────────────────────────
+
+    def test_phase_f_all_semantic_rules_have_exclude_keywords(self):
+        """Phase F: 5 条 semantic rule 全部应含 exclude_keywords 字段 (防误判)"""
+        import yaml
+        from pathlib import Path
+        rules_path = Path(__file__).resolve().parent.parent / "src" / "dsa_mcp" / "alerts" / "rules.yaml"
+        with open(rules_path) as f:
+            rules = yaml.safe_load(f)
+        sem_ids = {"insider_reduction", "earnings_warning", "regulatory_penalty",
+                   "lockup_expiry", "major_event"}
+        sem_rules = [r for r in rules if r["id"] in sem_ids]
+        assert len(sem_rules) == 5, f"expected 5 semantic rules, got {len(sem_rules)}"
+        for r in sem_rules:
+            excl = r.get("exclude_keywords") or []
+            assert len(excl) >= 2, f"{r['id']} 应含 >=2 个 exclude_keywords, got {excl}"
+
+    def test_phase_f_earnings_warning_excludes_industry(self):
+        """Phase F: earnings_warning 排除 '行业亏损面扩大' 类新闻"""
+        from dsa_mcp.alerts.checker import check_alert
+        # 行业宏观新闻 → 不触发
+        ann_industry = [
+            {"title": "行业亏损面扩大, 板块整体业绩承压", "announcement_time": "2026-07-02", "link": "http://i"},
+            {"title": "宏观环境恶化, 全行业预亏", "announcement_time": "2026-07-02", "link": "http://j"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_industry)
+        ew_sigs = [s for s in r["signals"] if s["rule_id"] == "earnings_warning"]
+        assert len(ew_sigs) == 0, f"行业宏观新闻不应触发, got {ew_sigs}"
+        # 真公司公告 → 触发
+        ann_real = [
+            {"title": "关于公司 2026 年半年度业绩预亏的公告", "announcement_time": "2026-07-02", "link": "http://k"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_real)
+        assert any(s["rule_id"] == "earnings_warning" for s in r["signals"])
+
+    def test_phase_f_regulatory_penalty_excludes_macro(self):
+        """Phase F: regulatory_penalty 排除 '金融监管处罚多家平台' 类政策新闻"""
+        from dsa_mcp.alerts.checker import check_alert
+        ann_macro = [
+            {"title": "金融监管处罚多家平台, 行业监管政策收紧", "announcement_time": "2026-07-02", "link": "http://m"},
+            {"title": "国家监管局对行业发布整改要求", "announcement_time": "2026-07-02", "link": "http://n"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_macro)
+        rp_sigs = [s for s in r["signals"] if s["rule_id"] == "regulatory_penalty"]
+        assert len(rp_sigs) == 0, f"宏观政策新闻不应触发, got {rp_sigs}"
+        # 真处罚公告 → 触发
+        ann_real = [
+            {"title": "关于收到中国证监会警示函的公告", "announcement_time": "2026-07-02", "link": "http://o"},
+        ]
+        r = check_alert("000001", {}, None, announcements=ann_real)
+        assert any(s["rule_id"] == "regulatory_penalty" for s in r["signals"])

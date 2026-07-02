@@ -96,6 +96,14 @@
     - field: announcement_title
       op: any_of
       value: ["预亏", "亏损", "业绩预告", "业绩预减"]
+  # Phase F: 排除宏观/行业新闻误判 (避免"行业亏损面扩大"这类新闻误判为公司业绩预亏)
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "赛道"
+    - "宏观"
+    - "整体"
+    - "全行业"
 
 - id: regulatory_penalty
   name: 监管处罚
@@ -105,6 +113,13 @@
     - field: announcement_title
       op: any_of
       value: ["处罚", "警示函", "整改", "立案调查", "监管措施"]
+  # Phase F: 排除行业/政策新闻 (避免"金融监管处罚多家平台"误判为公司处罚)
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "监管政策"
+    - "国家"
+    - "金融监管"
 
 - id: lockup_expiry
   name: 解禁
@@ -114,6 +129,12 @@
     - field: announcement_title
       op: any_of
       value: ["解禁", "解除限售", "限售股上市流通"]
+  # Phase F: 排除宏观/行业新闻 (避免"行业限售解禁潮"误判为公司公告)
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "市场"
+    - "全市场"
 
 - id: major_event
   name: 重大事件
@@ -123,6 +144,12 @@
     - field: announcement_title
       op: any_of
       value: ["重大资产重组", "收购", "合并", "股份回购", "股权激励", "股东大会决议", "停牌", "复牌", "担保"]
+  # Phase F: 排除宏观/行业新闻 (避免"行业并购潮"等新闻误判为公司公告)
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "赛道"
+    - "宏观"
 
 # ── Fund Flow (2 rules, data from 8084 get_fund_flow) ──
 
