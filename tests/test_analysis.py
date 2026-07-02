@@ -138,3 +138,80 @@ class TestAlerts:
         assert r["triggered"]
         ids = [s["rule_id"] for s in r["signals"]]
         assert "regulatory_penalty" in ids
+
+    def test_semantic_multiple_announcements_unique_ids(self):
+        """Phase 5c: 同一 rule 命中多条公告 → 每条 announcement_id 独立 signal"""
+        from dsa_mcp.alerts.checker import check_alert
+        # keywords: 重大资产重组 / 收购 / 合并 / 股份回购 / 股权激励 / 股东大会决议 / 停牌 / 复牌 / 担保
+        anns = [
+            {"id": 100, "title": "关于为子公司提供担保的公告", "announcement_time": "2026-06-30", "link": "http://a"},
+            {"id": 101, "title": "关于公司股份回购的公告", "announcement_time": "2026-06-29", "link": "http://b"},
+            {"id": 102, "title": "关于召开股东大会决议的通知", "announcement_time": "2026-06-28", "link": "http://c"},
+        ]
+        r = check_alert("000001", {}, None, announcements=anns)
+        assert r["triggered"]
+        major_sigs = [s for s in r["signals"] if s["rule_id"] == "major_event"]
+        # 3 条公告 → 3 条 major_event signals
+        assert len(major_sigs) == 3, f"expected 3, got {len(major_sigs)}"
+        ann_ids = {s.get("announcement_id") for s in major_sigs}
+        assert ann_ids == {100, 101, 102}, f"ann_ids mismatch: {ann_ids}"
+
+    def test_semantic_announcement_hk_fallback(self):
+        """Phase 5c: 港股用 stock_news fallback (akshare 无 hk announcement)"""
+        import asyncio
+        from dsa_mcp.server import _fetch_announcements
+        # 不真跑 HTTP, 仅验证 is_hk 分支路径
+        # 通过 monkey-patch httpx 拦截
+        import dsa_mcp.server as srv
+        called = {"primary": None, "fallback": None}
+        class FakeResp:
+            def __init__(self, items):
+                self._items = items
+            def raise_for_status(self): pass
+            def json(self):
+                return {"items": self._items}
+        class FakeClient:
+            async def get(self, url, params=None):
+                dt = (params or {}).get("data_type", "")
+                called["primary" if called["primary"] is None else "fallback"] = dt
+                if dt == "stock_news":
+                    return FakeResp([
+                        {"id": 999, "title": "美团回购公告", "published": "2026-07-01 10:00:00", "link": "http://hk"},
+                    ])
+                return FakeResp([])
+            async def aclose(self): pass
+        async def fake_get_client():
+            return FakeClient()
+        srv._http_client = None
+        srv._get_client = fake_get_client
+        items = asyncio.run(_fetch_announcements("hk03690", days=30))
+        assert called["primary"] == "stock_news", f"expected stock_news primary for hk, got {called}"
+        assert len(items) == 1
+        assert items[0]["id"] == 999
+        assert items[0]["title"] == "美团回购公告"
+        assert items[0]["source"] == "stock_news"
+        srv._http_client = None
+
+    def test_alert_daemon_dedup_dict_nested(self):
+        """Phase 5c: alert_daemon dedup state 字典嵌套 + 公告多 unique id 保留"""
+        import json
+        import sys
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed (expected at ~/.hermes/scripts/)")
+        # 模拟 push 流程
+        spec = __import__("importlib.util").util.spec_from_file_location("ad", daemon_path)
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # _signal_value 测试
+        sig_ann1 = {"rule_id": "major_event", "announcement_id": "100", "reason": "担保"}
+        sig_ann2 = {"rule_id": "major_event", "announcement_id": "101", "reason": "回购"}
+        v1 = mod._signal_value(sig_ann1)
+        v2 = mod._signal_value(sig_ann2)
+        assert v1 != v2, "不同 announcement_id 应有不同 value"
+        assert v1.startswith("ann:major_event:")
+        # 价量
+        sig_tech = {"rule_id": "ma5_below_ma20", "reason": "MA5(67) < MA20(71)"}
+        v3 = mod._signal_value(sig_tech)
+        assert not v3.startswith("ann:"), "价量 rule 不应该用 ann: prefix"

@@ -196,7 +196,7 @@ def check_alert(
                     "source": "announcement",
                     "link": m["ann"].get("link"),
                     "announcement_time": m["ann"].get("announcement_time"),
-                    "announcement_id": m["ann"].get("id"),  # 用于 daemon 去重同一公告
+                    "announcement_id": m["ann"].get("id") or m["ann"].get("announcement_id"),
                 })
 
     return {
