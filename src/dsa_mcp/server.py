@@ -1,10 +1,11 @@
 """
 dsa-mcp MCP Server — analysis tools ported from daily_stock_analysis (52k★)
 
-Iron rule (zsd 2026-07-02): ALL data comes from 8084 MCP.
-No direct database dSA DB imports.
+Iron rule (zsd 2026-07-02): ALL data comes from 8084 REST (/api/v1/history +
+/api/v1/data). No direct database / no dSA DB imports. Aggregation of intraday
+ticks into daily K-line happens in-process.
 
-Port: 8087 (stdio-based, managed by systemd)
+Protocol: stdio (managed by systemd as dsa-mcp.service)
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # 8084 MCP client — ALL data goes through this
 # ──────────────────────────────────────────────────
 
-_FDS_BASE = os.environ.get("FDS_MCP_URL", "http://localhost:8086")
+_FDS_REST = os.environ.get("FDS_BASE_URL", "http://localhost:8084")
 _HTTP_TIMEOUT = 15.0
 _http_client: httpx.AsyncClient | None = None
 
@@ -42,51 +43,74 @@ async def _get_client() -> httpx.AsyncClient:
     return _http_client
 
 
-async def _call_8084(tool_name: str, **params) -> dict:
-    """Call 8084 MCP tool (JSON-RPC over HTTP)."""
-    client = await _get_client()
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": {k: v for k, v in params.items() if v is not None}},
-        "id": 1,
-    }
-    try:
-        resp = await client.post(f"{_FDS_BASE}/api/v1/mcp", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        if "result" in data:
-            return data["result"].get("content", [{}])[0].get("text", {})
-        return {"error": data.get("error", {}).get("message", "unknown error")}
-    except Exception as e:
-        logger.warning(f"_call_8084({tool_name}) failed: {e}")
-        return {"error": str(e)}
-
-
 async def _fetch_kline(symbol: str, days: int = 60) -> list[dict]:
-    """Fetch OHLCV from 8084 MCP."""
-    result = await _call_8084("get_kline", symbol=symbol, days=days)
-    if isinstance(result, str):
-        try:
-            result = json.loads(result)
-        except (json.JSONDecodeError, TypeError):
-            return []
-    if isinstance(result, dict) and "data" in result:
-        return result["data"]
-    if isinstance(result, list):
-        return result
-    return []
+    """
+    Fetch OHLCV from 8084 REST and aggregate intraday ticks into daily K-line.
+
+    8084 history?data_type=price returns intraday snapshots (~every 5min during
+    trading hours). Group by trade_date, produce open/high/low/close/volume.
+
+    Schema expected by analysis tools (StockTrendAnalyzer):
+      [{"date": "YYYY-MM-DD", "open": float, "high": float, "low": float,
+        "close": float, "volume": float}, ...]
+    """
+    client = await _get_client()
+    try:
+        resp = await client.get(
+            f"{_FDS_REST}/api/v1/history",
+            params={"symbol": symbol, "data_type": "price", "days": days},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as e:
+        logger.warning(f"_fetch_kline({symbol}) failed: {e}")
+        return []
+
+    items = payload.get("items", [])
+    if not items:
+        return []
+
+    pd_mod = _get_pd()
+    df = pd_mod.DataFrame(items)
+    if df.empty or "trade_time" not in df.columns:
+        return []
+
+    df["trade_time"] = pd_mod.to_datetime(df["trade_time"], errors="coerce")
+    df["date"] = df["trade_time"].dt.date.astype(str)
+
+    daily = (
+        df.groupby("date", sort=True)
+        .agg(
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("price", "last"),
+            volume=("volume", "sum"),
+        )
+        .reset_index()
+        .to_dict(orient="records")
+    )
+    return daily
 
 
 async def _fetch_quote(symbol: str) -> dict:
-    """Fetch realtime quote from 8084 MCP."""
-    result = await _call_8084("get_quote", symbol=symbol)
-    if isinstance(result, str):
-        try:
-            result = json.loads(result)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    return result if isinstance(result, dict) else {}
+    """Fetch realtime quote from 8084 REST (/api/v1/data?data_type=price)."""
+    client = await _get_client()
+    try:
+        resp = await client.get(
+            f"{_FDS_REST}/api/v1/data",
+            params={
+                "source": "akshare",
+                "symbol": symbol,
+                "data_type": "price",
+                "fresh": "false",
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.warning(f"_fetch_quote({symbol}) failed: {e}")
+        return {}
 
 
 # ──────────────────────────────────────────────────
@@ -113,118 +137,112 @@ app = Server("dsa-mcp")
 @app.list_tools()
 async def list_tools():
     """Return tool descriptions for MCP protocol."""
-    from mcp.types import Tool, ToolInputSchema
+    from mcp.types import Tool
     tools = [
         Tool(
             name="calculate_macd",
             description="Calculate MACD indicator from K-line data. Fetches 60 days K-line from 8084 internally.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code, e.g. '600519'"},
                     "fast": {"type": "integer", "description": "Fast EMA period (default: 12)"},
                     "slow": {"type": "integer", "description": "Slow EMA period (default: 26)"},
                     "signal": {"type": "integer", "description": "Signal period (default: 9)"},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="calculate_ma",
             description="Calculate moving averages (MA5/10/20/30/60/120/250 or custom periods) for a stock. Fetches K-line from 8084.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code"},
                     "periods": {"type": "string", "description": "Comma-separated periods (default: '5,10,20,60')"},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="get_volume_analysis",
             description="Analyse volume-price relationship. Fetches K-line from 8084.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code"},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="analyze_pattern",
             description="Detect candlestick patterns (Doji, Hammer, Star, Engulfing, Double Bottom, breakout). Fetches K-line from 8084.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code"},
                     "days": {"type": "integer", "description": "Lookback days (default: 60)"},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="analyze_trend",
             description="Comprehensive technical trend analysis. Returns MACD, RSI, MA alignment, support/resistance, buy/sell signal.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code"},
                     "days": {"type": "integer", "description": "Lookback days (default: 60)"},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="list_strategies",
             description="List all 15 trading strategies from dSA. Returns name + display_name + category for each.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={},
-            ),
+            inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="get_strategy",
             description="Get the full instructions text of a trading strategy by ID.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "strategy_id": {"type": "string", "description": "Strategy ID (e.g. 'ma_golden_cross')"},
                 },
-                required=["strategy_id"],
-            ),
+                "required": ["strategy_id"],
+            },
         ),
         Tool(
             name="list_alert_types",
             description="List all available alert/rule types. Each has name, severity, description.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={},
-            ),
+            inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="check_alert",
             description="Check alerts for a symbol. Pure signal, no push. Data from 8084 MCP.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "symbol": {"type": "string", "description": "Stock code to check"},
                     "rule_id": {"type": "string", "description": "Optional, check only this rule. None = all."},
                 },
-                required=["symbol"],
-            ),
+                "required": ["symbol"],
+            },
         ),
         Tool(
             name="get_agent_prompt",
             description="Get an agent prompt template (port from dSA). Agent names: technical, intel, risk, portfolio, decision, decision_chat.",
-            inputSchema=ToolInputSchema(
-                type="object",
-                properties={
+            inputSchema={
+                "type": "object",
+                "properties": {
                     "agent_name": {"type": "string", "description": "Agent name"},
                 },
-                required=["agent_name"],
-            ),
+                "required": ["agent_name"],
+            },
         ),
     ]
     return tools
@@ -234,7 +252,7 @@ async def list_tools():
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list:
-    from mcp.types import TextContent, ToolResult
+    from mcp.types import TextContent
 
     symbol = arguments.get("symbol", "")
     days = arguments.get("days", 60)
