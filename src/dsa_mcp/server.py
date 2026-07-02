@@ -112,6 +112,41 @@ async def _fetch_quote(symbol: str) -> dict:
         logger.warning(f"_fetch_quote({symbol}) failed: {e}")
         return {}
 
+async def _fetch_fund_flow(symbol: str, days: int = 5) -> list[dict]:
+    """
+    Fetch single-symbol fund flow from 8084 REST.
+
+    A 股 → /data?data_type=fund_flow&symbol=002202 (eastmoney 主力排行)
+    港股 → akshare 不支持 hk fund_flow, 返 []
+
+    Returns list of {rank_data, main_net_inflow, change_pct, super_large_net, large_net, medium_net, small_net}.
+    Used by fund-flow alert rules (main_inflow_surge, main_outflow_surge).
+    """
+    is_hk = symbol.startswith("hk")
+    if is_hk:
+        return []  # akshare 不支持 hk 资金流
+    client = await _get_client()
+    try:
+        resp = await client.get(
+            f"{_FDS_REST}/api/v1/data",
+            params={
+                "source": "akshare",
+                "symbol": symbol,
+                "data_type": "fund_flow",
+                "flow_type": "main_fund_rank",
+                "days": days,
+                "limit": days,
+                "fresh": "false",
+            },
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", []) or []
+        return items
+    except Exception as e:
+        logger.warning(f"_fetch_fund_flow({symbol}) failed: {e}")
+        return []
+
+
 async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
     """
     Fetch company announcements from 8084 REST.
@@ -418,18 +453,19 @@ async def call_tool(name: str, arguments: dict) -> list:
 
     if name == "check_alert":
         rule_id = arguments.get("rule_id")
-        # Parallel data fetch: quote + kline + announcements
+        # Parallel data fetch: quote + kline + announcements + fund_flow
         import asyncio
         quote_task = _fetch_quote(symbol)
         kline_task = _fetch_kline(symbol, days=60)
         announcements_task = _fetch_announcements(symbol, days=90)
-        quote, kline, announcements = await asyncio.gather(
-            quote_task, kline_task, announcements_task
+        fund_flow_task = _fetch_fund_flow(symbol, days=5)
+        quote, kline, announcements, fund_flow = await asyncio.gather(
+            quote_task, kline_task, announcements_task, fund_flow_task
         )
         pd = _get_pd()
         df = pd.DataFrame(kline)
         from dsa_mcp.alerts.checker import check_alert as _check
-        result = _check(symbol, quote, df, announcements=announcements, rule_id=rule_id)
+        result = _check(symbol, quote, df, announcements=announcements, rule_id=rule_id, fund_flow=fund_flow)
         return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
     if name == "get_agent_prompt":

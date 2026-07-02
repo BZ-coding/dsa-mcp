@@ -290,3 +290,64 @@ class TestAlerts:
         exec(recap_path.read_text(encoding="utf-8"), ns)
         md = ns["format_signals_table"]([])
         assert "当日无 alert" in md or "无推送" in md
+
+    def test_fund_flow_inflow_surge(self):
+        """Phase C: main_inflow_surge 规则 (主力净流入 >= 1 亿)"""
+        from dsa_mcp.alerts.checker import check_alert
+        # 14.27 亿 > 1 亿, 应触发 main_inflow_surge
+        fund_flow = [
+            {"id": 1, "rank_data": "2026-07-01", "main_net_inflow": 1427443152, "change_pct": 0.0999},
+        ]
+        r = check_alert("002202", {}, None, fund_flow=fund_flow)
+        assert r["triggered"]
+        ids = [s["rule_id"] for s in r["signals"]]
+        assert "main_inflow_surge" in ids
+        sig = next(s for s in r["signals"] if s["rule_id"] == "main_inflow_surge")
+        assert sig["source"] == "fund_flow"
+        assert sig["value"] == 1427443152
+        assert "14.27 亿" in sig["reason"]
+        assert "+9.99" in sig["reason"]
+
+    def test_fund_flow_outflow_surge(self):
+        """Phase C: main_outflow_surge 规则 (主力净流出 <= -1 亿)"""
+        from dsa_mcp.alerts.checker import check_alert
+        fund_flow = [
+            {"id": 2, "rank_data": "2026-07-01", "main_net_inflow": -250000000, "change_pct": -0.05},
+        ]
+        r = check_alert("002202", {}, None, fund_flow=fund_flow)
+        assert r["triggered"]
+        ids = [s["rule_id"] for s in r["signals"]]
+        assert "main_outflow_surge" in ids
+
+    def test_fund_flow_no_trigger(self):
+        """Phase C: 主力小幅流入 (< 1 亿) 不触发"""
+        from dsa_mcp.alerts.checker import check_alert
+        fund_flow = [
+            {"id": 3, "rank_data": "2026-07-01", "main_net_inflow": 50000000, "change_pct": 0.01},  # 5 千万
+        ]
+        r = check_alert("002202", {}, None, fund_flow=fund_flow)
+        ff_sigs = [s for s in r["signals"] if s.get("source") == "fund_flow"]
+        assert len(ff_sigs) == 0, f"5 千万不应触发 fund_flow rule, got {ff_sigs}"
+
+    def test_fund_flow_empty(self):
+        """Phase C: 无 fund_flow 数据 → 不触发 (港股 fallback 测试)"""
+        from dsa_mcp.alerts.checker import check_alert
+        r = check_alert("hk03690", {}, None, fund_flow=[])
+        ff_sigs = [s for s in r["signals"] if s.get("source") == "fund_flow"]
+        assert len(ff_sigs) == 0
+
+    def test_fund_flow_rule_count(self):
+        """Phase C: rules.yaml 含 main_inflow_surge + main_outflow_surge 2 条"""
+        import yaml
+        from pathlib import Path
+        rules_path = Path(__file__).resolve().parent.parent / "src" / "dsa_mcp" / "alerts" / "rules.yaml"
+        with open(rules_path) as f:
+            rules = yaml.safe_load(f)
+        ff_rules = [
+            r for r in rules
+            if any(c.get("field") == "main_net_inflow" for c in r.get("conditions", []))
+        ]
+        assert len(ff_rules) == 2, f"expected 2 fund_flow rules, got {len(ff_rules)}"
+        ids = {r["id"] for r in ff_rules}
+        assert "main_inflow_surge" in ids
+        assert "main_outflow_surge" in ids

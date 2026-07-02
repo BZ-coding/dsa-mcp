@@ -30,4 +30,4 @@ logs/
 
 # Local config
 .env
-.env.local
+.env.localdata/

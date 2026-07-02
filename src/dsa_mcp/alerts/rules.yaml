@@ -116,3 +116,23 @@
     - field: announcement_title
       op: any_of
       value: ["重大资产重组", "收购", "合并", "股份回购", "股权激励", "股东大会决议", "停牌", "复牌", "担保"]
+
+# ── Fund Flow (2 rules, data from 8084 get_fund_flow) ──
+
+- id: main_inflow_surge
+  name: 主力资金大幅流入
+  description: 单日主力净流入 > 1 亿, 关注资金面异动
+  severity: high
+  conditions:
+    - field: main_net_inflow
+      op: gte
+      value: 100000000  # 1 亿
+
+- id: main_outflow_surge
+  name: 主力资金大幅流出
+  description: 单日主力净流出 < -1 亿, 警惕机构出货
+  severity: high
+  conditions:
+    - field: main_net_inflow
+      op: lte
+      value: -100000000  # -1 亿

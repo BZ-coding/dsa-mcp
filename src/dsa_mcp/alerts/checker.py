@@ -34,6 +34,7 @@ def check_alert(
     kline_df: "pd.DataFrame | None",
     announcements: Optional[list] = None,
     rule_id: Optional[str] = None,
+    fund_flow: Optional[list] = None,
 ) -> dict:
     """
     Check alerts for a symbol. Pure signal generation.
@@ -184,7 +185,6 @@ def check_alert(
                     })
             if not matched_anns:
                 continue
-            # 按 announcement_time 倒序, 最新优先, 但最多返 3 条避免一条 sym 一推就刷屏
             matched_anns.sort(key=lambda x: x["ann"].get("announcement_time", ""), reverse=True)
             for m in matched_anns[:3]:
                 signals.append({
@@ -198,6 +198,51 @@ def check_alert(
                     "announcement_time": m["ann"].get("announcement_time"),
                     "announcement_id": m["ann"].get("id") or m["ann"].get("announcement_id"),
                 })
+
+    # ── Fund flow rules (main_inflow / main_outflow surge) ──
+    ff_rules = [
+        r for r in rules
+        if any(c.get("field") == "main_net_inflow" for c in r.get("conditions", []))
+    ]
+    if _target_rule:
+        ff_rules = [r for r in ff_rules if r.get("id") == _target_rule]
+
+    if fund_flow and ff_rules:
+        # 用最新一天数据判断
+        latest = fund_flow[0]
+        main_inflow = float(latest.get("main_net_inflow", 0) or 0)
+        change_pct = float(latest.get("change_pct", 0) or 0)
+        rank_date = latest.get("rank_data", "")
+
+        for frule in ff_rules:
+            rid = frule.get("id", "")
+            rname = frule.get("name", rid)
+            severity = frule.get("severity", "low")
+            for cond in frule.get("conditions", []):
+                op = cond.get("op")
+                threshold = cond.get("value")
+                if op == "gte" and main_inflow >= threshold:
+                    signals.append({
+                        "rule_id": rid,
+                        "severity": severity,
+                        "name": rname,
+                        "value": main_inflow,
+                        "reason": f"{rank_date}: 主力净流入 {main_inflow/1e8:.2f} 亿 (涨幅 {change_pct*100:+.2f}%)",
+                        "source": "fund_flow",
+                        "rank_data": rank_date,
+                        "fund_flow_id": latest.get("id"),
+                    })
+                elif op == "lte" and main_inflow <= threshold:
+                    signals.append({
+                        "rule_id": rid,
+                        "severity": severity,
+                        "name": rname,
+                        "value": main_inflow,
+                        "reason": f"{rank_date}: 主力净流出 {main_inflow/1e8:.2f} 亿 (涨幅 {change_pct*100:+.2f}%)",
+                        "source": "fund_flow",
+                        "rank_data": rank_date,
+                        "fund_flow_id": latest.get("id"),
+                    })
 
     return {
         "symbol": symbol,
