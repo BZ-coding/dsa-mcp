@@ -1,0 +1,109 @@
+# Alert rules — seed (dSA risk_agent inspired)
+# Iron rule: pure signal, no push, no DB, no scheduling
+# All data comes from 8084 MCP (passed in as parameters)
+# 11 rules, all runnable with 8084 data
+
+# ── Technical (6 rules, data from 8084 get_kline) ──
+
+- id: bias_ma5_over_5pct
+  name: 乖离率超5%
+  description: 收盘价相对 MA5 乖离率 > 5%, 不追高
+  severity: low
+  conditions:
+    - field: bias_ma5
+      op: gte
+      value: 5.0
+
+- id: volume_breakout_3x
+  name: 放量3倍
+  description: 当日成交量 > 5日均量 3 倍
+  severity: medium
+  conditions:
+    - field: volume_ratio
+      op: gte
+      value: 3.0
+
+- id: price_break_20d_high
+  name: 突破20日新高
+  description: 收盘价创近20日新高
+  severity: high
+  conditions:
+    - field: close
+      op: gte
+      value: max_20d_high
+
+- id: macd_death_cross
+  name: MACD 死叉
+  description: DIF 下穿 DEA, 转空信号
+  severity: high
+  conditions:
+    - field: macd_dif_dea
+      op: cross_below
+      value: 0
+
+- id: rsi_overbought_70
+  name: RSI > 70 超买
+  description: RSI 进入超买区域, 警惕回调
+  severity: low
+  conditions:
+    - field: rsi_14
+      op: gte
+      value: 70
+
+- id: ma5_below_ma20
+  name: MA5 < MA20 空头排列
+  description: 短期均线跌破长期均线, 趋势偏空
+  severity: medium
+  conditions:
+    - field: ma5_ma20
+      op: lt
+      value: 0
+
+# ── Valuation (1 rule, data from 8084 get_fundamental) ──
+
+- id: valuation_pe_anomaly
+  name: PE 异常
+  description: 市盈率 > 100 或为负, 估值过高
+  severity: medium
+  conditions:
+    - field: pe_ttm
+      op: any
+      value: [">100", "<0"]
+
+# ── News/Event (4 rules, data from 8084 get_announcements / get_news) ──
+
+- id: insider_reduction
+  name: 大股东减持
+  description: 公告中有股东减持信息
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: contains
+      value: "减持"
+
+- id: earnings_warning
+  name: 业绩预亏
+  description: 公告揭示业绩预亏或变脸
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: contains
+      value: "预亏"
+
+- id: regulatory_penalty
+  name: 监管处罚
+  description: 公告显示监管处罚或立案调查
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: contains
+      value: "处罚"
+
+- id: lockup_expiry
+  name: 解禁
+  description: 公告显示限售股解禁
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: contains
+      value: "解禁"

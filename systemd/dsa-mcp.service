@@ -1,0 +1,19 @@
+[Unit]
+Description=dsa-mcp — Analysis MCP server (ported from dSA)
+After=network.target
+Requires=market-data-service.service
+After=market-data-service.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/zsd/codes/dsa-mcp
+ExecStart=/home/zsd/codes/dsa-mcp/venv/bin/python -m dsa_mcp.server
+Restart=always
+RestartSec=5
+Environment="FDS_MCP_URL=http://localhost:8086"
+Environment="PATH=/home/zsd/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+StandardOutput=append:/home/zsd/codes/dsa-mcp/logs/dsa-mcp.log
+StandardError=append:/home/zsd/codes/dsa-mcp/logs/dsa-mcp.log
+
+[Install]
+WantedBy=default.target
