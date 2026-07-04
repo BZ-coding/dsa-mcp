@@ -557,6 +557,10 @@ class TestAlerts:
     def test_phase_a_append_history_creates_jsonl(self, tmp_path, monkeypatch):
         """Phase A: append_history 写入 HISTORY_FILE JSONL"""
         import importlib.util
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed (expected at ~/.hermes/scripts/)")
         spec = importlib.util.spec_from_file_location("alert_daemon_a", "/home/zsd/.hermes/scripts/alert_daemon.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -589,6 +593,10 @@ class TestAlerts:
         """Phase A: alert_query.py 按 sym 过滤"""
         import json
         import subprocess
+        from pathlib import Path
+        query_path = Path("/home/zsd/.hermes/scripts/alert_query.py")
+        if not query_path.exists():
+            pytest.skip("alert_query.py not deployed (expected at ~/.hermes/scripts/)")
         # 用临时历史文件跑 alert_query 不会要 — 直接 import 跑 main()
         spec = __import__("importlib.util").util.spec_from_file_location(
             "alert_query",
@@ -627,6 +635,10 @@ class TestAlerts:
 
     def test_phase_a_alert_query_aggregates_by_sym(self):
         """Phase A: aggregate_by_sym 计数对"""
+        from pathlib import Path
+        query_path = Path("/home/zsd/.hermes/scripts/alert_query.py")
+        if not query_path.exists():
+            pytest.skip("alert_query.py not deployed")
         spec = __import__("importlib.util").util.spec_from_file_location(
             "alert_query",
             "/home/zsd/.hermes/scripts/alert_query.py",
@@ -646,6 +658,10 @@ class TestAlerts:
 
     def test_phase_a_alert_query_aggregates_by_rule_severity(self):
         """Phase A: aggregate_by_rule 计数对"""
+        from pathlib import Path
+        query_path = Path("/home/zsd/.hermes/scripts/alert_query.py")
+        if not query_path.exists():
+            pytest.skip("alert_query.py not deployed")
         spec = __import__("importlib.util").util.spec_from_file_location(
             "alert_query",
             "/home/zsd/.hermes/scripts/alert_query.py",
@@ -670,6 +686,10 @@ class TestAlerts:
 
     def test_phase_a_format_table_empty(self):
         """Phase A: 空历史应输出警告, 不崩"""
+        from pathlib import Path
+        query_path = Path("/home/zsd/.hermes/scripts/alert_query.py")
+        if not query_path.exists():
+            pytest.skip("alert_query.py not deployed")
         spec = __import__("importlib.util").util.spec_from_file_location(
             "alert_query",
             "/home/zsd/.hermes/scripts/alert_query.py",
@@ -684,6 +704,10 @@ class TestAlerts:
     def test_phase_a_signal_value_stable(self):
         """Phase A: _signal_value 同一 signal 输出稳定 key (append 兼容)"""
         import importlib.util
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed")
         spec = importlib.util.spec_from_file_location("ad", "/home/zsd/.hermes/scripts/alert_daemon.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
