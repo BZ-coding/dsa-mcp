@@ -458,3 +458,94 @@ class TestAlerts:
         ]
         r = check_alert("000001", {}, None, announcements=ann_real)
         assert any(s["rule_id"] == "regulatory_penalty" for s in r["signals"])
+
+    # ────────────────────────────────────────────────────
+    # Phase F': 合并推送 (同 tick 多 sym → 1 条飞书)
+    # ────────────────────────────────────────────────────
+
+    def test_phase_fprime_combined_message_format(self):
+        """Phase F': _build_combined_msg 把多 sym 信号合并成 1 条飞书"""
+        import importlib.util
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed (expected at ~/.hermes/scripts/)")
+        spec = importlib.util.spec_from_file_location("ad", daemon_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        groups = [
+            ("002202", [
+                {"rule_id": "main_inflow_surge", "severity": "high",
+                 "name": "主力资金大幅流入",
+                 "reason": "主力净流入 14.27 亿 (涨幅 +9.99%)"},
+                {"rule_id": "major_event", "severity": "medium",
+                 "name": "重大事件",
+                 "reason": "公告 #229311 关于对外担保"},
+            ]),
+            ("hk03690", [
+                {"rule_id": "ma5_below_ma20", "severity": "medium",
+                 "name": "MA5 < MA20 空头排列",
+                 "reason": "MA5(70.21) < MA20(70.44)"},
+            ]),
+            ("hk09988", [
+                {"rule_id": "rsi_overbought_70", "severity": "low",
+                 "name": "RSI > 70 超买",
+                 "reason": "RSI=72.3 进入超买区域"},
+            ]),
+        ]
+        msg = mod._build_combined_msg(groups)
+        # header
+        assert msg.startswith("🔔"), f"消息应以 🔔 开头, got: {msg[:30]}"
+        assert "3 标的" in msg
+        assert "4 触发" in msg
+        # 每个 sym 一节
+        for sym, _ in groups:
+            assert sym in msg, f"消息应包含 sym {sym}"
+        # A 股 / 港股 标签
+        assert "(A股)" in msg
+        assert "(港股)" in msg
+        # severity 全部大写
+        for sev in ["HIGH", "MEDIUM", "LOW"]:
+            assert f"[{sev}]" in msg, f"消息应含 [{sev}]"
+        # 长度合理 (无 LLM 解读占用, 应该 ~300 字)
+        assert len(msg) < 500, f"消息过长 ({len(msg)} 字符), 应 ≤500"
+
+    def test_phase_fprime_format_market_tag(self):
+        """Phase F': _format_market_tag 正确区分 A 股 / 港股"""
+        import importlib.util
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed")
+        spec = importlib.util.spec_from_file_location("ad", daemon_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod._format_market_tag("002202") == "A股"
+        assert mod._format_market_tag("600519") == "A股"
+        assert mod._format_market_tag("300750") == "A股"
+        assert mod._format_market_tag("hk03690") == "港股"
+        assert mod._format_market_tag("hk09988") == "港股"
+        # 边界
+        assert mod._format_market_tag("") == ""
+
+    def test_phase_fprime_combined_message_empty(self):
+        """Phase F': 空 groups 不应崩"""
+        import importlib.util
+        from pathlib import Path
+        daemon_path = Path("/home/zsd/.hermes/scripts/alert_daemon.py")
+        if not daemon_path.exists():
+            pytest.skip("alert_daemon not deployed")
+        spec = importlib.util.spec_from_file_location("ad", daemon_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # 单 sym / 单 signal
+        groups = [
+            ("002202", [
+                {"rule_id": "ma5_below_ma20", "severity": "low",
+                 "name": "MA5<MA20", "reason": "test"},
+            ]),
+        ]
+        msg = mod._build_combined_msg(groups)
+        assert "1 标的" in msg
+        assert "1 触发" in msg
+        assert "002202" in msg
