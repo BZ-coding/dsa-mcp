@@ -549,3 +549,146 @@ class TestAlerts:
         assert "1 标的" in msg
         assert "1 触发" in msg
         assert "002202" in msg
+
+    # ────────────────────────────────────────────────────
+    # Phase A: alert 历史回放 + alert_history.jsonl append
+    # ────────────────────────────────────────────────────
+
+    def test_phase_a_append_history_creates_jsonl(self, tmp_path, monkeypatch):
+        """Phase A: append_history 写入 HISTORY_FILE JSONL"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("alert_daemon_a", "/home/zsd/.hermes/scripts/alert_daemon.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # monkey-patch HISTORY_FILE 路径
+        test_history = tmp_path / "history.jsonl"
+        monkeypatch.setattr(mod, "HISTORY_FILE", test_history)
+
+        groups = [
+            ("002202", [
+                {"rule_id": "major_event", "severity": "medium",
+                 "name": "重大事件", "reason": "公告 test",
+                 "metadata": {"value": "test"}},
+            ]),
+        ]
+        mod.append_history("2026-07-04T15:30:00", groups)
+
+        assert test_history.exists()
+        lines = test_history.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        import json as _json
+        rec = _json.loads(lines[0])
+        assert rec["ts"] == "2026-07-04T15:30:00"
+        assert rec["sym_count"] == 1
+        assert rec["signal_count"] == 1
+        assert rec["groups"][0]["sym"] == "002202"
+        assert rec["groups"][0]["signals"][0]["rule_id"] == "major_event"
+
+    def test_phase_a_alert_query_filters_by_sym(self):
+        """Phase A: alert_query.py 按 sym 过滤"""
+        import json
+        import subprocess
+        # 用临时历史文件跑 alert_query 不会要 — 直接 import 跑 main()
+        spec = __import__("importlib.util").util.spec_from_file_location(
+            "alert_query",
+            "/home/zsd/.hermes/scripts/alert_query.py",
+        )
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # 构造临时 records
+        records = [
+            {
+                "ts": "2026-07-02T19:03:30",
+                "sym_count": 2,
+                "signal_count": 2,
+                "groups": [
+                    {"sym": "002202", "signals": [
+                        {"rule_id": "major_event", "severity": "medium",
+                         "name": "重大事件", "reason": "test"}
+                    ]},
+                    {"sym": "hk03690", "signals": [
+                        {"rule_id": "ma5_below_ma20", "severity": "medium",
+                         "name": "MA5<MA20", "reason": "test"}
+                    ]},
+                ],
+            }
+        ]
+        # 按 sym 过滤
+        import sys as _sys
+        from datetime import datetime
+        since = datetime(2026, 7, 1)
+        until = datetime(2026, 7, 31, 23, 59, 59)
+        filtered = mod.filter_records(records, sym="002202", since=since, until=until)
+        assert len(filtered) == 1
+        syms = [g["sym"] for g in filtered[0]["groups"]]
+        assert syms == ["002202", "hk03690"]  # record 保留, sym filter 不裁 record
+
+    def test_phase_a_alert_query_aggregates_by_sym(self):
+        """Phase A: aggregate_by_sym 计数对"""
+        spec = __import__("importlib.util").util.spec_from_file_location(
+            "alert_query",
+            "/home/zsd/.hermes/scripts/alert_query.py",
+        )
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        records = [
+            {"ts": "2026-07-02T10:00:00", "sym_count": 1, "groups": [{"sym": "002202", "signals": []}]},
+            {"ts": "2026-07-02T11:00:00", "sym_count": 1, "groups": [{"sym": "002202", "signals": []}]},
+            {"ts": "2026-07-02T12:00:00", "sym_count": 1, "groups": [{"sym": "hk03690", "signals": []}]},
+        ]
+        agg = mod.aggregate_by_sym(records)
+        assert agg["002202"] == 2
+        assert agg["hk03690"] == 1
+        assert agg.get("hk09988", 0) == 0
+
+    def test_phase_a_alert_query_aggregates_by_rule_severity(self):
+        """Phase A: aggregate_by_rule 计数对"""
+        spec = __import__("importlib.util").util.spec_from_file_location(
+            "alert_query",
+            "/home/zsd/.hermes/scripts/alert_query.py",
+        )
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        records = [
+            {
+                "ts": "2026-07-02T10:00:00", "sym_count": 1,
+                "groups": [{"sym": "002202", "signals": [
+                    {"rule_id": "main_inflow_surge", "severity": "high", "name": "X", "reason": "Y"},
+                    {"rule_id": "major_event", "severity": "medium", "name": "X", "reason": "Y"},
+                    {"rule_id": "major_event", "severity": "medium", "name": "X", "reason": "Y"},
+                ]}],
+            }
+        ]
+        agg = mod.aggregate_by_rule(records, sym="002202")
+        assert agg["main_inflow_surge"]["high"] == 1
+        assert agg["major_event"]["medium"] == 2
+        assert agg.get("ma5_below_ma20", {}).get("medium", 0) == 0
+
+    def test_phase_a_format_table_empty(self):
+        """Phase A: 空历史应输出警告, 不崩"""
+        spec = __import__("importlib.util").util.spec_from_file_location(
+            "alert_query",
+            "/home/zsd/.hermes/scripts/alert_query.py",
+        )
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        out = mod.fmt_table([], sym=None, days=7)
+        assert "0 条" in out
+        assert "无推送记录" in out
+
+    def test_phase_a_signal_value_stable(self):
+        """Phase A: _signal_value 同一 signal 输出稳定 key (append 兼容)"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ad", "/home/zsd/.hermes/scripts/alert_daemon.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        sig = {"rule_id": "major_event", "announcement_id": "12345", "reason": "test"}
+        v1 = mod._signal_value(sig)
+        v2 = mod._signal_value(sig)
+        assert v1 == v2, f"_signal_value 不稳定: {v1} != {v2}"
