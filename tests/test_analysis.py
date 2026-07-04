@@ -716,3 +716,148 @@ class TestAlerts:
         v1 = mod._signal_value(sig)
         v2 = mod._signal_value(sig)
         assert v1 == v2, f"_signal_value 不稳定: {v1} != {v2}"
+
+
+class TestMcpServerCapabilities:
+    """Phase G: verify `dsa_mcp/server.py` advertises tools capability.
+
+    Without `ServerCapabilities(tools=ToolsCapability())` in
+    `InitializationOptions`, MCP clients that respect the spec (e.g. hermes)
+    skip `tools/list` at discovery time and the server's tools go
+    un-registered. This test pins the fix in place so it can't regress.
+    """
+
+    def test_run_uses_typed_capabilities_not_empty_dict(self):
+        import os
+        from pathlib import Path
+        import re
+
+        # Resolve src/ relative to repo root (works locally AND on CI).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = Path(repo_root) / "src" / "dsa_mcp" / "server.py"
+        src_text = src.read_text()
+
+        # Anchor on `def run():` at the top level (line-start + indent = 0).
+        run_match = re.search(
+            r"^def run\(\):(.*?)(?=^def |\nclass |\Z)",
+            src_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert run_match, "could not locate top-level run() in server.py"
+        body = run_match.group(1)
+
+        # Strip docstrings (single + multi-line) AND single-line `#` comments
+        # before scanning for the bug so explanatory prose doesn't trigger a
+        # false positive.
+        body_no_doc = re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^\n]*"', "", body)
+        # Drop lines whose first non-whitespace is `#`.
+        body_no_doc = "\n".join(
+            line for line in body_no_doc.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+        # Must NOT contain the old bug: `capabilities={}` (literal empty dict).
+        assert "capabilities={}" not in body_no_doc, (
+            "dsa_mcp/server.py run() still passes capabilities={}. "
+            "MCP clients skip tools/list when the server doesn't advertise "
+            "the tools capability, so all server tools stay un-registered."
+        )
+
+        # Must use the typed ServerCapabilities API so tools are advertised.
+        assert "from mcp.types import" in body_no_doc, "missing mcp.types import"
+        assert "ServerCapabilities" in body_no_doc, "missing ServerCapabilities"
+        assert "ToolsCapability" in body_no_doc, "missing ToolsCapability"
+        assert "tools=ToolsCapability()" in body_no_doc, "tools capability not advertised"
+
+    def test_initialize_response_advertises_tools(self):
+        """End-to-end: spawn the stdio server, send initialize, parse
+        capabilities.tools from the JSONRPC reply. Catches future
+        regressions where the typed capability gets dropped again.
+        """
+        import json
+        import os
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        # Resolve working directory from pytest's rootdir (works both
+        # locally and on CI; the repo name is fixed).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # tests/test_analysis.py → repo root (one level up).
+
+        env = os.environ.copy()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "dsa_mcp.server"],
+            cwd=repo_root,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        try:
+            init = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"},
+                },
+            }
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(init) + "\n")
+            proc.stdin.flush()
+            time.sleep(1.5)
+            # Close stdin (EOF) so the server can decide to exit; if it
+            # doesn't, we kill it after a short timeout.
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+            # Read whatever output is buffered. communicate() can race
+            # with the already-closed stdin, so just use a poll loop.
+            out = ""
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                chunk = proc.stdout.read() if proc.stdout else ""
+                if chunk:
+                    out += chunk
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            try:
+                rest, _ = proc.communicate(timeout=2)
+                out += rest
+            except Exception:
+                pass
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.send_signal(signal.SIGTERM)
+                    proc.wait(timeout=3)
+                except Exception:
+                    proc.kill()
+
+        # Parse the first JSON object containing `"id": 1` and a `result`.
+        result = None
+        for line in out.splitlines():
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("id") == 1 and "result" in obj:
+                result = obj["result"]
+                break
+
+        assert result is not None, "no initialize response received"
+        caps = result.get("capabilities", {})
+        assert isinstance(caps.get("tools"), dict), (
+            f"initialize response missing tools capability: {caps!r}"
+        )

@@ -483,6 +483,7 @@ def run():
     """Entry point for uvicorn/mcp-run."""
     import mcp.server.stdio
     from mcp.server.models import InitializationOptions
+    from mcp.types import ServerCapabilities, ToolsCapability
 
     async def _run():
         async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -492,7 +493,10 @@ def run():
                 InitializationOptions(
                     server_name="dsa-mcp",
                     server_version="0.1.0",
-                    capabilities={},
+                    # Advertise tool capability so MCP clients (e.g. hermes)
+                    # know to query tools/list. With `capabilities={}` they
+                    # skip discovery and the server's tools go un-registered.
+                    capabilities=ServerCapabilities(tools=ToolsCapability()),
                 ),
             )
 
