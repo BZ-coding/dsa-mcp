@@ -152,8 +152,8 @@ async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
     Fetch company announcements from 8084 REST.
 
     A 股 → /data?data_type=announcement (akshare 巨潮)
-    港股 → akshare 无公告 source, fallback 到 /data?data_type=stock_news
-           (东方财富/雪球 个股新闻; 标题当 announcement 处理)
+    港股 → 优先 /data?data_type=hkex_announcement (港交所披露易, 标的专属)
+           fallback → /data?data_type=stock_news (东方财富聚合流, Phase 5c 兼容)
 
     Returns list of {id, title, announcement_time, link, source}.
     Used by semantic alert rules (insider_reduction, earnings_warning,
@@ -161,26 +161,51 @@ async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
     """
     client = await _get_client()
     is_hk = symbol.startswith("hk")
-    # 港股 akshare 无公告; A 股用 announcement; 优先按 is_hk 决定
-    primary_type = "stock_news" if is_hk else "announcement"
 
     items: list[dict] = []
-    try:
-        resp = await client.get(
-            f"{_FDS_REST}/api/v1/data",
-            params={
-                "source": "akshare",
-                "symbol": symbol,
-                "data_type": primary_type,
-                "fresh": "false",
-            },
-        )
-        resp.raise_for_status()
-        items = resp.json().get("items", []) or []
-    except Exception as e:
-        logger.warning(f"_fetch_announcements({symbol} primary={primary_type}) failed: {e}")
+    primary_type = None
 
-    # A 股 announcement endpoint 可能 404 (新 symbol 还没拉过), fallback 到 stock_news
+    # 港股: 优先 hkex_announcement (Phase 7, 2026-07-06)
+    if is_hk:
+        try:
+            resp = await client.get(
+                f"{_FDS_REST}/api/v1/data",
+                params={
+                    "source": "akshare",
+                    "symbol": symbol,
+                    "data_type": "hkex_announcement",
+                    "fresh": "false",
+                },
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", []) or []
+            primary_type = "hkex_announcement"
+        except Exception as e:
+            logger.warning(f"_fetch_announcements({symbol} hkex) failed: {e}")
+
+    # 港股 fallback + A 股: stock_news / announcement
+    if not items:
+        if is_hk:
+            fallback_type = "stock_news"
+        else:
+            fallback_type = "announcement"
+        try:
+            resp = await client.get(
+                f"{_FDS_REST}/api/v1/data",
+                params={
+                    "source": "akshare",
+                    "symbol": symbol,
+                    "data_type": fallback_type,
+                    "fresh": "false",
+                },
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", []) or []
+            primary_type = fallback_type
+        except Exception as e:
+            logger.warning(f"_fetch_announcements({symbol} {fallback_type}) failed: {e}")
+
+    # A 股 announcement 可能 404 (新 symbol 还没拉过), fallback 到 stock_news
     if not items and not is_hk:
         try:
             resp = await client.get(
