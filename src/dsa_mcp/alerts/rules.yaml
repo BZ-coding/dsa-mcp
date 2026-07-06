@@ -151,6 +151,64 @@
     - "赛道"
     - "宏观"
 
+# ── HKEX 港股特有公告类型 (Phase 8, 2026-07-06) ──
+# HKEX LONG_TEXT 字段直接给分类 (vs cninfo 需关键词匹配), 精准度高
+# 实测 90 天数据: share_buyback 12 条, monthly_return 7 条, dividend 2 条, convertible 2 条, spin_off 1 条
+
+- id: share_buyback
+  name: 股份回购
+  description: HKEX 公告披露公司股份回购 (Next Day Disclosure Returns - Share Buyback)
+  severity: medium
+  conditions:
+    - field: announcement_title
+      op: any_of
+      value: ["Share Buyback", "股份回购", "购回股份"]
+  # 排除: 行业资金流新闻可能含"回购"二字 (e.g. "南向资金回购港股")
+  exclude_keywords:
+    - "南向资金"
+    - "北向资金"
+    - "行业"
+    - "板块"
+
+- id: dividend_distribution
+  name: 派息公告
+  description: HKEX 公告披露派息/分红 (Dividend or Distribution)
+  severity: medium
+  conditions:
+    - field: announcement_title
+      op: any_of
+      value: ["Dividend or Distribution", "派息", "分红", "末期股息", "中期股息"]
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "市场"
+    - "预期"
+
+- id: convertible_securities
+  name: 可转债/换股债发行
+  description: HKEX 公告披露可换股证券/票据发行 (Issue of Convertible Securities)
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: any_of
+      value: ["Issue of Convertible Securities", "Convertible Bonds", "Convertible Notes", "可换股债券", "可转债"]
+  exclude_keywords:
+    - "行业"
+    - "板块"
+
+- id: spin_off
+  name: 业务分拆
+  description: HKEX 公告披露业务/子公司分拆上市 (Spin-off)
+  severity: high
+  conditions:
+    - field: announcement_title
+      op: any_of
+      value: ["Spin-off", "Spin Off", "分拆上市", "业务分拆"]
+  exclude_keywords:
+    - "行业"
+    - "板块"
+    - "市场"
+
 # ── Fund Flow (2 rules, data from 8084 get_fund_flow) ──
 
 - id: main_inflow_surge
