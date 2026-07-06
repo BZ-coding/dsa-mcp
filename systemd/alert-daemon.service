@@ -1,0 +1,21 @@
+[Unit]
+Description=alert-daemon — Phase 5a 盘中 alert 轮询 (dsa-mcp + hermes send)
+After=network.target
+# dsa-mcp 是 stdio 服务, 每次 alert-daemon 调起 spawn 即可, 不需要常驻
+Wants=market-data-service.service
+After=market-data-service.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/zsd
+ExecStart=/home/zsd/codes/dsa-mcp/venv/bin/python -u /home/zsd/codes/dsa-mcp/scripts/alert_daemon.py
+Restart=always
+RestartSec=30
+# 不开 --once, 走 daemon mainloop, 5min 轮询 + 仅 A 股交易时段
+Environment="PYTHONUNBUFFERED=1"
+Environment="PATH=/home/zsd/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+StandardOutput=append:/home/zsd/.hermes/logs/alert-daemon.log
+StandardError=append:/home/zsd/.hermes/logs/alert-daemon.log
+
+[Install]
+WantedBy=default.target
