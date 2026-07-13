@@ -36,13 +36,11 @@ LOCK_FILE = HERMES_HOME / ".alert_daemon.lock"
 HISTORY_FILE = HERMES_HOME / "alert_history.jsonl"  # Phase A: append-only 推送历史
 DSA_MCP_CALL = HERMES_HOME / "scripts" / "dsa_mcp_call.py"
 
-# 2026-07-07: revert 改回 home channel (oc_29c414134c106a728ab5a91d56863cd4)
-# 历史 daemon 一直推到 home (DM with ou_01c88c62c4f14c0f37dc5f73ee7c9ae2, 用户当前 DM session)
-# 某时间点被改成 "oc_90857aaa9c3a4533fdc12c008ca14d00" 注释为 "用户从该群发起的请求"
-# 但当前 session 是 DM 不是群, 而且 verify cron (725de2454fe3) deliver 也是 home,
-# 全部 cron 都 deliver 到 oc_29c4141, alert-daemon 应该跟 cron 同目标避免 chat 错位
-# skill alert-daemon-pattern §36 改 chat 标准流程: probe + 注释 + log 验证
-FEISHU_CHAT = "feishu:oc_29c414134c106a728ab5a91d56863cd4"
+# 2026-07-07: 改到 hermes agent 群 (oc_90857aaa9c3a4533fdc12c008ca14d00)
+# 用户原话: "可以把这个alert发到这个群里来吗?" (当前 session = group: hermes agent 群)
+# 历史: 02:15 有人以"cron 一致性" revert 回 home (oc_29c4141), 但用户是唯一事实源 → 改回
+# skill alert-daemon-pattern §36 标准流程: probe + 注释 + log 验证
+FEISHU_CHAT = "feishu:oc_90857aaa9c3a4533fdc12c008ca14d00"
 
 # 持仓文件 → symbol list (持有跨市标的)
 PORTFOLIO_FILES = [
@@ -269,12 +267,15 @@ MIN_PUSH_INTERVAL_SEC = 30 * 60  # 30 min
 
 
 def _signal_value(sig: dict) -> str:
-    """提取 signal 的可比 value (rule_id + 数值). 数值变化才重推同 rule.
+    """提取 signal 的可比 value (dedup key).
 
-    Phase 5c 增强:
-    - announcement 类信号 → 用 announcement_id (同一公告只推一次)
-      key = (rule_id, announcement_id) — 同一 rule 多个公告 各算一个 dedup entry
-    - 价量类信号 → 用 reason[:60] (数值变化才算变)
+    设计原则 (Phase G 2026-07-07 修复):
+    - 公告类信号 → 用 announcement_id (同一公告只推一次)
+    - 价量类信号 → 用 rule_id 单独作 key (数值微变是"持续状态"不是"新事件")
+      旧版 bug: reason 文本带数值 (如 "MA5(94.45) < MA20(96.49)") 作 key → RSI 71.8→72.0
+      或 MA5(94.45)→(94.99) 微变都被当成"新信号"每 5min 重推, 一天能推 30+ 次同一 rule.
+    修复: 价量类只看 rule_id, 不看数值. 数值变化 → 同 rule 视为"未变"skip.
+      用户只在"信号消失再触发"或"严重度升级"时才收到新 push.
     """
     rid = sig.get("rule_id", "")
     # 公告类规则 (Phase 7+: 港股 HKEX 4 条新增) → 用 announcement_id 精确去重
@@ -286,33 +287,99 @@ def _signal_value(sig: dict) -> str:
         ann_id = sig.get("announcement_id") or sig.get("link") or sig.get("reason", "")[:60]
         # key 必须带 rule_id 否则 5 条公告全归到一个 dedup entry
         return f"ann:{rid}:{ann_id}"
-    # 价量类: reason 文本作为变化信号 (RSI 70→80 → 文本不同)
-    reason = sig.get("reason", "") or ""
-    meta = sig.get("metadata") or {}
-    return f"{rid}|{meta.get('value', '')}|{reason[:60]}"
+    # 价量类: 数值微变是"持续状态"不是"新事件", 用 rule_id 单独 dedup.
+    # 副作用: 用户看不到"RSI 71.8→72.0"的升级, 但避免了"每 5min 重推同 rule" 的 spam.
+    return f"price:{rid}"
+
+
+# 连续 N 次轮询均未见某 signal 才视为真正消失。防 8084 短暂空响应导致
+# state 被清空、下一轮同一信号被当成“新事件”重复推送。
+SIGNAL_MISSING_POLLS_TO_EXPIRE = 3
+
+
+def _reconcile_signal_state(
+    prev_state: dict,
+    signals: list,
+    missing_threshold: int = SIGNAL_MISSING_POLLS_TO_EXPIRE,
+) -> tuple[list, dict]:
+    """合并本轮 signals 与上轮状态，返回 (to_push, next_state).
+
+    新信号立即进入 to_push；已知信号保留 pushed_at。暂时缺失的信号只增加
+    missing_count，连续 missing_threshold 轮缺失才删除，避免数据源抖动造成
+    reset → re-trigger → spam。
+    """
+    to_push = []
+    next_state: dict = {}
+    seen_keys: set[tuple[str, str]] = set()
+
+    for sig in signals:
+        rid = sig["rule_id"]
+        sig_key = _signal_value(sig)
+        seen_keys.add((rid, sig_key))
+        prev_rule = prev_state.get(rid) if isinstance(prev_state.get(rid), dict) else None
+        prev_meta = prev_rule.get(sig_key) if isinstance(prev_rule, dict) else None
+        if prev_meta and prev_meta.get("value") == sig_key:
+            meta = dict(prev_meta)
+            meta.pop("missing_count", None)
+            next_state.setdefault(rid, {})[sig_key] = meta
+        else:
+            to_push.append(sig)
+            next_state.setdefault(rid, {})[sig_key] = {
+                "value": sig_key,
+                "severity": sig.get("severity", "info"),
+                "pushed_at": "",
+            }
+
+    for rid, sigs in prev_state.items():
+        if not isinstance(sigs, dict):
+            continue
+        for sig_key, meta in sigs.items():
+            if (rid, sig_key) in seen_keys or not isinstance(meta, dict):
+                continue
+            missing_count = int(meta.get("missing_count", 0)) + 1
+            if missing_count >= missing_threshold:
+                continue
+            held = dict(meta)
+            held["missing_count"] = missing_count
+            next_state.setdefault(rid, {})[sig_key] = held
+
+    return to_push, next_state
 
 
 def _daily_push_count(state: dict, sym: str) -> int:
-    """今日已推送次数 (按 pushed_at 字段)."""
+    """今日已推送次数 (按 pushed_at 字段).
+
+    state schema (Phase 5c+): {sym: {rule_id: {sig_key: meta}}}
+    必须遍历三层才能拿到 meta 里的 pushed_at.
+    旧版 (两层遍历) 在 schema 升级后返 0, cap 完全失效.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
     sym_state = state.get(sym, {})
     n = 0
-    for rule_id, meta in sym_state.items():
-        if isinstance(meta, dict):
-            if meta.get("pushed_at", "").startswith(today):
-                n += 1
+    for rule_id, sigs in sym_state.items():
+        if isinstance(sigs, dict):
+            for sig_key, meta in sigs.items():
+                if isinstance(meta, dict):
+                    if meta.get("pushed_at", "").startswith(today):
+                        n += 1
     return n
 
 
 def _last_push_time(state: dict, sym: str) -> str:
-    """sym 最近一次推送时间 (ISO)."""
+    """sym 最近一次推送时间 (ISO).
+
+    必须遍历三层嵌套 (Phase 5c+ schema: {sym:{rule_id:{sig_key:meta}}}),
+    旧版两层遍历在 schema 升级后永远返 "", cooldown 失效 → 同 sym 5min 重推.
+    """
     sym_state = state.get(sym, {})
     latest = ""
-    for rule_id, meta in sym_state.items():
-        if isinstance(meta, dict):
-            ts = meta.get("pushed_at", "")
-            if ts > latest:
-                latest = ts
+    for rule_id, sigs in sym_state.items():
+        if isinstance(sigs, dict):
+            for sig_key, meta in sigs.items():
+                if isinstance(meta, dict):
+                    ts = meta.get("pushed_at", "")
+                    if ts > latest:
+                        latest = ts
     return latest
 
 
@@ -386,35 +453,31 @@ def poll_once(verbose: bool = True) -> int:
             signals = result.get("signals", [])
             prev_state = state.get(sym, {})
 
+            # 8084 / dsa-mcp 偶发返回空 signals 时不要立即清空 state。
+            # 连续 3 轮缺失才过期，避免 reset → 下一轮同一信号重推。
             if not result.get("triggered") or not signals:
-                # 全部规则都消失 → 清掉 sym 状态
-                if sym in state:
+                _, held_state = _reconcile_signal_state(prev_state, [])
+                if held_state:
+                    state[sym] = held_state
+                    if verbose:
+                        max_missing = max(
+                            int(meta.get("missing_count", 0))
+                            for sigs in held_state.values()
+                            for meta in sigs.values()
+                            if isinstance(meta, dict)
+                        )
+                        print(
+                            f"  [hold] {sym} no triggers "
+                            f"({max_missing}/{SIGNAL_MISSING_POLLS_TO_EXPIRE}), keep state"
+                        )
+                elif sym in state:
                     state.pop(sym, None)
                     if verbose:
-                        print(f"  [reset] {sym} no triggers, cleared state")
+                        print(f"  [expire] {sym} no triggers for {SIGNAL_MISSING_POLLS_TO_EXPIRE} polls")
                 continue
 
-            # 找出需要重推的 signals:
-            # - 新增 signal key (prev_state[rid][signal_key] 不存在)
-            # - signal value 变化
-            to_push = []
-            new_state_for_sym: dict = {}
-            for sig in signals:
-                rid = sig["rule_id"]
-                sig_key = _signal_value(sig)
-                prev_rule = prev_state.get(rid) if isinstance(prev_state.get(rid), dict) else None
-                prev_meta = prev_rule.get(sig_key) if isinstance(prev_rule, dict) else None
-                if prev_meta and prev_meta.get("value") == sig_key:
-                    # value 未变 → 保留 prev meta (含 pushed_at)
-                    new_state_for_sym.setdefault(rid, {})[sig_key] = prev_meta
-                else:
-                    # 新增 or value 变 → 列入推送队列
-                    to_push.append(sig)
-                    new_state_for_sym.setdefault(rid, {})[sig_key] = {
-                        "value": sig_key,
-                        "severity": sig.get("severity", "info"),
-                        "pushed_at": "",  # 实际推送后才填
-                    }
+            # 合并新旧 signals：新 key 推送；短暂缺失 key 先 hold，连续 3 轮才删除。
+            to_push, new_state_for_sym = _reconcile_signal_state(prev_state, signals)
 
             if not to_push:
                 if verbose:
