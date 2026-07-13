@@ -157,7 +157,7 @@ class TestAlerts:
         assert ann_ids == {100, 101, 102}, f"ann_ids mismatch: {ann_ids}"
 
     def test_semantic_announcement_hk_fallback(self):
-        """Phase 5c: 港股用 stock_news fallback (akshare 无 hk announcement)"""
+        """Phase 7: 港股优先 HKEX，空结果时 fallback stock_news"""
         import asyncio
         from dsa_mcp.server import _fetch_announcements
         # 不真跑 HTTP, 仅验证 is_hk 分支路径
@@ -185,7 +185,8 @@ class TestAlerts:
         srv._http_client = None
         srv._get_client = fake_get_client
         items = asyncio.run(_fetch_announcements("hk03690", days=30))
-        assert called["primary"] == "stock_news", f"expected stock_news primary for hk, got {called}"
+        assert called["primary"] == "hkex_announcement", f"expected hkex primary for hk, got {called}"
+        assert called["fallback"] == "stock_news", f"expected stock_news fallback, got {called}"
         assert len(items) == 1
         assert items[0]["id"] == 999
         assert items[0]["title"] == "美团回购公告"
