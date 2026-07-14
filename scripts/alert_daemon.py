@@ -357,6 +357,15 @@ def _reconcile_signal_state(
                         should_push = False  # cooldown 内, 静默
                 except ValueError:
                     pass
+                # Phase H.3 (2026-07-14): §I 短暂缺失恢复 → 仍视为"已推过"
+                # §I 防 8084 短抖 (1-3 轮空响应) 引起的 reset → re-trigger spam.
+                # §H 原 §25.8 修复只在 cooldown 内有效; 跨日 + 跨 cooldown 场景
+                # 下, §I 短暂缺失过的 signal 应继承 daily dedup 待遇 (prev_ts 今日
+                # 检查已不适用, 但 missing_count > 0 是"已知状态"信号, 不能当新事件).
+                # 缺这层 → pytest test_alert_daemon_debounce::test_one_transient_missing
+                # 跨日 + 过 cooldown 场景 fail; 实际线上表现为"跨日早盘短抖恢复 spam".
+                if int(prev_meta.get("missing_count", 0)) > 0 and not sev_escalated:
+                    should_push = False
             if sev_escalated:
                 should_push = True  # severity 升级, 立即推 (覆盖所有 dedup)
 
