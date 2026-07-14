@@ -263,7 +263,9 @@ def llm_interpret(symbol: str, signals: list, trend: dict | None) -> str:
 MAX_PUSHES_PER_DAY = 5  # Phase F: 3→5, 用户决定 (观察一周可调回)
 
 # Min interval between pushes for the same symbol (秒); 防短时间连续触发
-MIN_PUSH_INTERVAL_SEC = 30 * 60  # 30 min
+# Phase H (2026-07-14): 30min 太短, 同 5 sig 在 9h 内被推 30+ 次. 改为 4h — 足以
+# 让用户消化前一条 push, 又有 6 次/天的余量汇报进展 (4h cooldown + 4 push 上限).
+MIN_PUSH_INTERVAL_SEC = 4 * 60 * 60  # 4 h
 
 
 def _signal_value(sig: dict) -> str:
@@ -312,23 +314,64 @@ def _reconcile_signal_state(
     next_state: dict = {}
     seen_keys: set[tuple[str, str]] = set()
 
+    # Phase H (2026-07-14): cooldown gate — 已推送过的 signal 在 cooldown 窗口内
+    # 视为"已知且未变化",不入 to_push. 30min cooldown 后允许再推一次 (汇报进展).
+    # 之前 bug: 30min cap 之后下一轮 5min 内 signal 仍 re-emit → 走 _signal_value
+    # 相同 key → 跳过 dedup, 但 cap 通过 → 再推一次 → 9 小时 spam 几十条.
+    # 修复: dedup 阶段就拦, 即"prev_meta 存在 + pushed_at 在 cooldown 内" → skip.
+    # 触发再推条件 (任一):
+    #   1) prev_meta 不存在 (新 signal / 数据源短暂空响应后恢复)
+    #   2) severity 升级 (low → medium / medium → high)
+    #   3) pushed_at 距今 ≥ COOLDOWN (用户已知状态更新)
+    from datetime import datetime as _dt, timedelta as _td
+    now_dt = _dt.now()
+    cooldown_td = _td(seconds=MIN_PUSH_INTERVAL_SEC)
+
     for sig in signals:
         rid = sig["rule_id"]
         sig_key = _signal_value(sig)
         seen_keys.add((rid, sig_key))
         prev_rule = prev_state.get(rid) if isinstance(prev_state.get(rid), dict) else None
         prev_meta = prev_rule.get(sig_key) if isinstance(prev_rule, dict) else None
+
+        should_push = True
         if prev_meta and prev_meta.get("value") == sig_key:
-            meta = dict(prev_meta)
-            meta.pop("missing_count", None)
-            next_state.setdefault(rid, {})[sig_key] = meta
-        else:
+            # 已知 signal: 检查 daily rule dedup + cooldown + severity 升级
+            # Phase H.2 (2026-07-14): "每日同 rule 至多推一次" — 同 5 sig 在 9h 内被推
+            # 30+ 次, 4h cooldown 也救不了 4h+ 后的 re-emit. 加 daily dedup:
+            # 同 sig_key 在今日已被推过 (pushed_at 起始日期 == 今天) → 静默, 除非
+            # severity 升级 (用户需要知道风险加剧).
+            prev_ts = prev_meta.get("pushed_at", "")
+            prev_sev = prev_meta.get("severity", "info")
+            new_sev = sig.get("severity", "info")
+            sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3}
+            sev_escalated = sev_rank.get(new_sev, 0) > sev_rank.get(prev_sev, 0)
+
+            if prev_ts and prev_ts.startswith(now_dt.strftime("%Y-%m-%d")) and not sev_escalated:
+                # 今日已推过本 sig + 无升级 → 静默
+                should_push = False
+            elif prev_ts:
+                # 跨日或冷却逻辑: 仍受 cooldown 约束
+                try:
+                    if _dt.fromisoformat(prev_ts) + cooldown_td > now_dt and not sev_escalated:
+                        should_push = False  # cooldown 内, 静默
+                except ValueError:
+                    pass
+            if sev_escalated:
+                should_push = True  # severity 升级, 立即推 (覆盖所有 dedup)
+
+        if should_push:
             to_push.append(sig)
             next_state.setdefault(rid, {})[sig_key] = {
                 "value": sig_key,
                 "severity": sig.get("severity", "info"),
-                "pushed_at": "",
+                "pushed_at": prev_meta.get("pushed_at", "") if prev_meta else "",
             }
+        else:
+            # cooldown 内: 保留 meta (含 pushed_at / missing_count)
+            meta = dict(prev_meta)
+            meta.pop("missing_count", None)
+            next_state.setdefault(rid, {})[sig_key] = meta
 
     for rid, sigs in prev_state.items():
         if not isinstance(sigs, dict):
