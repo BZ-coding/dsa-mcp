@@ -77,6 +77,27 @@ def extract_symbols() -> list[str]:
     return sorted(symbols)
 
 
+def extract_symbol_name_map() -> dict[str, str]:
+    """持仓 JSON → {symbol: 中文名}. 推送消息里把代码还原成中文名 (如 hk03690→美团-W).
+
+    注意: 同名 hash 冲突时后读到的覆盖前者 (持仓 JSON 不应有重 symbol, 仅作 best-effort).
+    """
+    name_map: dict[str, str] = {}
+    for f in PORTFOLIO_FILES:
+        if not f.exists():
+            continue
+        try:
+            d = json.loads(f.read_text())
+            for p in d.get("positions", []) or []:
+                sym = p.get("symbol") or p.get("code")
+                name = (p.get("name") or "").strip()
+                if sym and name:
+                    name_map[sym] = name
+        except Exception as e:
+            print(f"[warn] read {f}: {e}", file=sys.stderr)
+    return name_map
+
+
 # ──────────────────────────────────────────────────
 # dsa-mcp call (stdlib subprocess wrapper)
 # ──────────────────────────────────────────────────
@@ -448,15 +469,23 @@ def _build_combined_msg(groups: list[tuple[str, list]]) -> str:
     """合成 1 条飞书消息 (覆盖本轮所有 sym).
 
     groups: [(sym, to_push_signals)] 列表, 已通过 dedup/cap/cooldown 过滤.
+    Phase K (2026-07-16): sym 后面拼接持仓中文名, 避免裸代码. Fallback 链:
+    持仓 JSON name → sym 原样. 每个 tick 都 fresh 读 (持仓变动即时反映).
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_signals = sum(len(sigs) for _, sigs in groups)
+    name_map = extract_symbol_name_map()
     header = f"🔔 **alert_daemon · {len(groups)} 标的 {total_signals} 触发**\n"
 
     sections = []
     for sym, sigs in groups:
         tag = _format_market_tag(sym)
-        title = f"📊 **{sym}**" + (f" ({tag})" if tag else "")
+        cn_name = name_map.get(sym) or sym
+        if cn_name == sym:
+            label = f"**{sym}**"
+        else:
+            label = f"**{cn_name}** ({sym})"
+        title = f"📊 {label}" + (f" ({tag})" if tag else "")
         lines = []
         for s in sigs:
             sev = s.get("severity", "?").upper()
