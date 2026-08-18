@@ -94,3 +94,97 @@ def test_transient_missing_after_cooldown_still_dedups():
     meta = restored["price_break_20d_high"]["price:price_break_20d_high"]
     assert "missing_count" not in meta  # 信号已恢复, missing_count 移除
     assert meta["pushed_at"] == "2026-07-13T09:22:06"  # pushed_at 保持, 不被新推覆盖
+
+
+def test_cross_day_persistent_signal_not_repushed():
+    """Phase J (2026-08-18): 跨日不重推 — 昨天推过的持续信号, 今天 00:00 后
+    不得全量重推. 原 bug: 8-18 00:03:31 推送 15 条 = 15/15 与 8-17 00:04:01
+    完全相同; 同一公告 (ann:229874) 8-13 发布被推到 8-18 共 4 次, 美团回购
+    17810 自 7-07 共推 27 次.
+    """
+    mod = _load_daemon()
+    # 跨日 state: pushed_at 是昨天 (必然过 cooldown), missing_count=0 (持续状态)
+    state = {
+        "price_break_20d_high": {
+            "price:price_break_20d_high": {
+                "value": "price:price_break_20d_high",
+                "severity": "high",
+                "pushed_at": "2026-08-17T00:04:01",
+            }
+        }
+    }
+    signal = {
+        "rule_id": "price_break_20d_high",
+        "severity": "high",
+        "reason": "收盘价 114.0 突破 20 日最高 113.0",
+    }
+    to_push, restored = mod._reconcile_signal_state(state, [signal], missing_threshold=3)
+    assert to_push == [], "跨日后昨天已推过的持续信号不得重推 (Phase J)"
+    meta = restored["price_break_20d_high"]["price:price_break_20d_high"]
+    assert meta["pushed_at"] == "2026-08-17T00:04:01"
+
+
+def test_cross_day_severity_escalation_still_pushes():
+    """Phase J: 跨日 + severity 升级仍要推 (风险加剧必须通知)."""
+    mod = _load_daemon()
+    state = {
+        "price_break_20d_high": {
+            "price:price_break_20d_high": {
+                "value": "price:price_break_20d_high",
+                "severity": "medium",
+                "pushed_at": "2026-08-17T00:04:01",
+            }
+        }
+    }
+    signal = {
+        "rule_id": "price_break_20d_high",
+        "severity": "high",
+        "reason": "收盘价 114.0 突破 20 日最高 113.0",
+    }
+    to_push, restored = mod._reconcile_signal_state(state, [signal], missing_threshold=3)
+    assert len(to_push) == 1, "severity 升级必须重推"
+    meta = restored["price_break_20d_high"]["price:price_break_20d_high"]
+    assert meta["severity"] == "high"
+
+
+def test_failed_push_retried_next_poll():
+    """Phase J: pushed_at 为空 (上次推送失败) → 下轮重试, 不能静默丢弃."""
+    mod = _load_daemon()
+    state = {
+        "price_break_20d_high": {
+            "price:price_break_20d_high": {
+                "value": "price:price_break_20d_high",
+                "severity": "high",
+                "pushed_at": "",
+            }
+        }
+    }
+    signal = {
+        "rule_id": "price_break_20d_high",
+        "severity": "high",
+        "reason": "收盘价 114.0 突破 20 日最高 113.0",
+    }
+    to_push, _ = mod._reconcile_signal_state(state, [signal], missing_threshold=3)
+    assert len(to_push) == 1, "从未成功推送的信号必须重试"
+
+
+def test_announcement_cross_day_not_repushed():
+    """Phase J: 公告类 (离散事件) 跨日更不能重推 — 同一公告只推一次."""
+    mod = _load_daemon()
+    state = {
+        "major_event": {
+            "ann:major_event:229874": {
+                "value": "ann:major_event:229874",
+                "severity": "medium",
+                "pushed_at": "2026-08-17T00:04:01",
+            }
+        }
+    }
+    signal = {
+        "rule_id": "major_event",
+        "severity": "medium",
+        "announcement_id": "229874",
+        "reason": '公告标题含 "担保": 关于全资子公司金风国际为其全资子公司金风巴西提供担保的公告',
+    }
+    to_push, _ = mod._reconcile_signal_state(state, [signal], missing_threshold=3)
+    assert to_push == []

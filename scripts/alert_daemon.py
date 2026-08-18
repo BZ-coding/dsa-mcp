@@ -340,14 +340,17 @@ def _reconcile_signal_state(
     # 之前 bug: 30min cap 之后下一轮 5min 内 signal 仍 re-emit → 走 _signal_value
     # 相同 key → 跳过 dedup, 但 cap 通过 → 再推一次 → 9 小时 spam 几十条.
     # 修复: dedup 阶段就拦, 即"prev_meta 存在 + pushed_at 在 cooldown 内" → skip.
+    #
+    # Phase J (2026-08-18): 跨日不再重推。原逻辑跨日后 (prev_ts 非今天 + cooldown
+    # 已过 + missing_count=0) → should_push=True → 每天 00:00 后全量重推昨日已推
+    # 信号: 8-18 00:03:31 推送 15 条 = 15/15 与 8-17 00:04:01 完全相同, 同一公告
+    # (ann:229874) 8-13 发布被推到 8-18 共 4 次, 美团回购 17810 自 7-07 推 27 次.
+    # 新语义: 同 key 已知信号推过一次后永不重推 (信号本身未变 = 非新事件),
     # 触发再推条件 (任一):
-    #   1) prev_meta 不存在 (新 signal / 数据源短暂空响应后恢复)
+    #   1) prev_meta 不存在 (新 signal / 信号消失 SIGNAL_MISSING_POLLS_TO_EXPIRE
+    #      轮后重新出现 → 下方 missing_count 过期机制)
     #   2) severity 升级 (low → medium / medium → high)
-    #   3) pushed_at 距今 ≥ COOLDOWN (用户已知状态更新)
-    from datetime import datetime as _dt, timedelta as _td
-    now_dt = _dt.now()
-    cooldown_td = _td(seconds=MIN_PUSH_INTERVAL_SEC)
-
+    #   3) pushed_at 为空 = 上次推送失败从未成功 → 重试
     for sig in signals:
         rid = sig["rule_id"]
         sig_key = _signal_value(sig)
@@ -357,38 +360,20 @@ def _reconcile_signal_state(
 
         should_push = True
         if prev_meta and prev_meta.get("value") == sig_key:
-            # 已知 signal: 检查 daily rule dedup + cooldown + severity 升级
-            # Phase H.2 (2026-07-14): "每日同 rule 至多推一次" — 同 5 sig 在 9h 内被推
-            # 30+ 次, 4h cooldown 也救不了 4h+ 后的 re-emit. 加 daily dedup:
-            # 同 sig_key 在今日已被推过 (pushed_at 起始日期 == 今天) → 静默, 除非
-            # severity 升级 (用户需要知道风险加剧).
+            # 已知 signal (推过或 hold 中): 不因跨日/跨 cooldown 重推
             prev_ts = prev_meta.get("pushed_at", "")
             prev_sev = prev_meta.get("severity", "info")
             new_sev = sig.get("severity", "info")
             sev_rank = {"info": 0, "low": 1, "medium": 2, "high": 3}
             sev_escalated = sev_rank.get(new_sev, 0) > sev_rank.get(prev_sev, 0)
-
-            if prev_ts and prev_ts.startswith(now_dt.strftime("%Y-%m-%d")) and not sev_escalated:
-                # 今日已推过本 sig + 无升级 → 静默
-                should_push = False
-            elif prev_ts:
-                # 跨日或冷却逻辑: 仍受 cooldown 约束
-                try:
-                    if _dt.fromisoformat(prev_ts) + cooldown_td > now_dt and not sev_escalated:
-                        should_push = False  # cooldown 内, 静默
-                except ValueError:
-                    pass
-                # Phase H.3 (2026-07-14): §I 短暂缺失恢复 → 仍视为"已推过"
-                # §I 防 8084 短抖 (1-3 轮空响应) 引起的 reset → re-trigger spam.
-                # §H 原 §25.8 修复只在 cooldown 内有效; 跨日 + 跨 cooldown 场景
-                # 下, §I 短暂缺失过的 signal 应继承 daily dedup 待遇 (prev_ts 今日
-                # 检查已不适用, 但 missing_count > 0 是"已知状态"信号, 不能当新事件).
-                # 缺这层 → pytest test_alert_daemon_debounce::test_one_transient_missing
-                # 跨日 + 过 cooldown 场景 fail; 实际线上表现为"跨日早盘短抖恢复 spam".
-                if int(prev_meta.get("missing_count", 0)) > 0 and not sev_escalated:
-                    should_push = False
             if sev_escalated:
                 should_push = True  # severity 升级, 立即推 (覆盖所有 dedup)
+            elif not prev_ts:
+                should_push = True  # 从未成功推送过 (上次 push 失败) → 重试
+            else:
+                # 推过且无升级: 跨日、跨 cooldown、短抖恢复 (§H.3 场景)
+                # 全部静默 — 信号本身没变, 用户不需要重复内容
+                should_push = False
 
         if should_push:
             to_push.append(sig)
