@@ -43,6 +43,42 @@ async def _get_client() -> httpx.AsyncClient:
     return _http_client
 
 
+def _market_time(item: dict) -> str:
+    """提取 8084 price_data 行的【市场行情时间】，统一成 "YYYY-MM-DD HH:MM:SS"。
+
+    外层 trade_time 是采集时间；raw_data.raw.trade_time 才是市场时间
+    （腾讯港股格式 "2026/10/28 15:40:02"）。两者在离盘时段会差一天。
+    返回朴素时间字符串（不做时区转换，保持交易所本地墙钟时间）。
+    """
+    def _norm(s: str) -> str:
+        s = str(s).strip()
+        if "T" in s:
+            s = s.replace("T", " ")
+        s = s.split(".")[0].split("+")[0].split("Z")[0].strip()
+        # compact: "20261027 15:00:00"
+        if len(s) >= 8 and s[:8].isdigit():
+            return f"{s[0:4]}-{s[4:6]}-{s[6:8]} {s[9:17] if len(s) > 9 else '00:00:00'}"
+        # ISO: "2026-10-28 15:40:02"
+        if len(s) >= 19:
+            return s[:19]
+        return s
+
+    raw = item.get("raw_data")
+    if raw:
+        try:
+            import json as _json
+
+            inner = _json.loads(raw).get("raw") or {}
+            t = inner.get("trade_time")
+            if t:
+                return _norm(str(t).replace("/", "-"))
+        except Exception:
+            pass
+    # 回退：外层 trade_time（可能是 ISO 或 compact 两种格式）
+    t = item.get("trade_time")
+    return _norm(t) if t else ""
+
+
 async def _fetch_kline(symbol: str, days: int = 60) -> list[dict]:
     """
     Fetch OHLCV from 8084 REST and aggregate intraday ticks into daily K-line.
@@ -75,21 +111,44 @@ async def _fetch_kline(symbol: str, days: int = 60) -> list[dict]:
     if df.empty or "trade_time" not in df.columns:
         return []
 
-    df["trade_time"] = pd_mod.to_datetime(df["trade_time"], errors="coerce")
-    df["date"] = df["trade_time"].dt.date.astype(str)
-
-    daily = (
-        df.groupby("date", sort=True)
-        .agg(
-            open=("open", "first"),
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("price", "last"),
-            volume=("volume", "sum"),
-        )
-        .reset_index()
-        .to_dict(orient="records")
+    # 1) 日期分组用 raw_data 内的市场行情时间，不能用外层 trade_time。
+    #    外层 trade_time 是"采集时间"（离盘时段也在跑，5min 一条），
+    #    而离盘快照携带的是【上一交易日】的 OHLC —— 用它分组会把
+    #    昨日 high/low 算进今日。raw_data.raw.trade_time 才是市场时间。
+    df["mkt_time"] = pd_mod.to_datetime(
+        pd_mod.Series([_market_time(it) for it in items], index=df.index),
+        errors="coerce",
     )
+    df["date"] = df["mkt_time"].dt.strftime("%Y-%m-%d")
+
+    # 2) 剔除脏 OHLC：腾讯港股在开盘前几笔返回 open/high/low=0。
+    #    直接 min/max 会让整日 low=0（实测 38/60 日被污染）。
+    for col in ("open", "high", "low"):
+        if col in df.columns:
+            df[col] = pd_mod.to_numeric(df[col], errors="coerce")
+
+    df = df.sort_values("mkt_time")
+
+    def _agg(g, day: str) -> dict:
+        valid = g[(g["high"] > 0) & (g["low"] > 0) & (g["open"] > 0)]
+        src = valid if len(valid) else g
+        row = {
+            "date": day,
+            "open": float(src["open"].iloc[0]) if len(valid) else float(g["price"].iloc[0]),
+            "high": float(src["high"].max()) if len(valid) else float(g["price"].max()),
+            "low": float(src["low"].min()) if len(valid) else float(g["price"].min()),
+            "close": float(g["price"].iloc[-1]),
+            # 逐笔快照的 volume 是【当日累计量】，按 sum 会重复累加（实测虚高 200 倍）。
+            # 日成交量应取当日累计量的最大值（即收盘时的累计值）。
+            "volume": float(g["volume"].max()) if "volume" in g.columns and g["volume"].notna().any() else 0.0,
+        }
+        return row
+
+    daily = [
+        _agg(g, day)
+        for day, g in df.groupby("date", sort=True)
+        if isinstance(day, str) and day
+    ]
     return daily
 
 

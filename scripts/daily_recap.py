@@ -48,6 +48,8 @@ def extract_symbols() -> list[str]:
                 sym = p.get("symbol") or p.get("code")
                 if sym and not sym.startswith(("0", "1", "2", "3", "5", "6", "9")) and not sym.startswith("hk"):
                     continue
+                if sym and p.get("active", True) is False:
+                    continue  # 用户标记不再盯的标的跳过
                 if sym:
                     symbols.add(sym)
         except Exception as e:

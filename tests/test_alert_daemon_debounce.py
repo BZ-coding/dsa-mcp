@@ -47,15 +47,28 @@ def test_one_transient_missing_poll_keeps_signal_state_without_repush():
     assert meta["pushed_at"] == "2026-07-13T09:22:06"
 
 
-def test_three_consecutive_missing_polls_expire_signal_state():
+def test_three_consecutive_missing_polls_hold_signal_state():
+    """§I 改用「永不 expire + 60min cooldown」语义（2026-10-15 变更）。
+
+    旧实现 3 轮 missing 就删 state，导致 dsa_mcp_call 抖动恢复后 prev_meta
+    丢失 → 同一信号被当成新事件重推（10-15 线上重复推 3 次）。
+    新实现：missing_count 累加但保留 state，只在 >=100 轮（长期不再出现）
+    才丢弃。本测试锁定该语义，防止退回"3 轮即过期"。
+    """
     mod = _load_daemon()
     state = _prev_state()
-    for expected in (1, 2):
+    for expected in (1, 2, 3):
         _, state = mod._reconcile_signal_state(state, [], missing_threshold=3)
         meta = state["price_break_20d_high"]["price:price_break_20d_high"]
         assert meta["missing_count"] == expected
-    _, state = mod._reconcile_signal_state(state, [], missing_threshold=3)
-    assert state == {}
+    # 3 轮之后 state 必须仍在（不得 expire）
+    assert "price_break_20d_high" in state, "missing 3 轮不应删除 state"
+    # 长期不再出现（>=100 轮）才真正丢弃
+    for _ in range(100):
+        _, state = mod._reconcile_signal_state(state, [], missing_threshold=3)
+        if "price_break_20d_high" not in state:
+            break
+    assert state == {}, "超过 100 轮 missing 应丢弃 state"
 
 
 def test_transient_missing_after_cooldown_still_dedups():

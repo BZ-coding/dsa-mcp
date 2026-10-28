@@ -59,7 +59,7 @@ TRADING_HOURS = [(dtime(9, 30), dtime(11, 30)), (dtime(13, 0), dtime(15, 0))]
 # ──────────────────────────────────────────────────
 
 def extract_symbols() -> list[str]:
-    """从持仓 JSON 抽出 symbol 列表 (去重, 跳过基金场外)."""
+    """从持仓 JSON 抽出 symbol 列表 (去重, 跳过基金场外, 跳过 active=false)."""
     symbols = set()
     for f in PORTFOLIO_FILES:
         if not f.exists():
@@ -70,6 +70,11 @@ def extract_symbols() -> list[str]:
                 sym = p.get("symbol") or p.get("code")
                 if sym and not sym.startswith(("0", "1", "2", "3", "5", "6", "9")) and not sym.startswith("hk"):
                     continue  # 基金代码前缀跳过
+                # 用户标记"不用再盯"的标的必须跳过，否则会继续轮询并推送。
+                # daily_recap.py 早已有此过滤，但 daemon 漏了 → 002202 停止盯盘后
+                # 仍在 10-26 00:02 推了 4 条公告。
+                if sym and p.get("active", True) is False:
+                    continue
                 if sym:
                     symbols.add(sym)
         except Exception as e:
@@ -318,6 +323,28 @@ def _signal_value(sig: dict) -> str:
 # 连续 N 次轮询均未见某 signal 才视为真正消失。防 8084 短暂空响应导致
 # state 被清空、下一轮同一信号被当成“新事件”重复推送。
 SIGNAL_MISSING_POLLS_TO_EXPIRE = 3
+# 2026-10-15: 加 60min cooldown 窗口. 同 key 信号 60min 内最多推一次.
+# 解决 10-15 bug: 11:21 推后 13:12~13:22 dsa_mcp_call 报空, missing_count=3
+# 把 bias_ma5 从 state expire 掉, 13:30 恢复后 prev_meta 丢失 → 重推 3 次.
+# 新策略: missing_count 永远不 expire, 60min cooldown 限制推频.
+SIGNAL_COOLDOWN_MINUTES = 60
+
+
+def _is_in_cooldown(prev_meta: dict | None, now: "datetime | None" = None) -> bool:
+    """检查 prev_meta 是否在 cooldown 窗口内 (默认 60min)."""
+    if not prev_meta:
+        return False
+    prev_ts = prev_meta.get("pushed_at", "")
+    if not prev_ts:
+        return False
+    try:
+        from datetime import datetime as _dt
+        now = now or _dt.now()
+        prev_dt = _dt.fromisoformat(prev_ts)
+        elapsed_min = (now - prev_dt).total_seconds() / 60
+        return elapsed_min < SIGNAL_COOLDOWN_MINUTES
+    except (ValueError, TypeError):
+        return False
 
 
 def _reconcile_signal_state(
@@ -370,9 +397,13 @@ def _reconcile_signal_state(
                 should_push = True  # severity 升级, 立即推 (覆盖所有 dedup)
             elif not prev_ts:
                 should_push = True  # 从未成功推送过 (上次 push 失败) → 重试
+            elif _is_in_cooldown(prev_meta):
+                # 60min cooldown 窗口内: 跳过, 防止 dsa_mcp 抖动后 missing
+                # → expire → 重新出现时 prev_meta 丢失 → 重复推.
+                should_push = False
             else:
-                # 推过且无升级: 跨日、跨 cooldown、短抖恢复 (§H.3 场景)
-                # 全部静默 — 信号本身没变, 用户不需要重复内容
+                # 推过且无升级但已过 cooldown: 静默 — 信号本身没变,
+                # 用户不需要重复内容 (Phase J 跨日不再重推语义).
                 should_push = False
 
         if should_push:
@@ -395,7 +426,11 @@ def _reconcile_signal_state(
             if (rid, sig_key) in seen_keys or not isinstance(meta, dict):
                 continue
             missing_count = int(meta.get("missing_count", 0)) + 1
-            if missing_count >= missing_threshold:
+            # 2026-10-15: 改 missing_count 永远不 expire. 旧逻辑 3 轮 missing
+            # (15min) 后从 state 删除 → 信号重新出现时 prev_meta 丢失 → 重推.
+            # 新策略: 保留 meta (包含 pushed_at) → cooldown gate 在重新出现时
+            # 仍能拦住. 极端情况下 (几天没出现) 上限 100 轮 missing 才清理, 避免 state 无限增长.
+            if missing_count >= 100:
                 continue
             held = dict(meta)
             held["missing_count"] = missing_count

@@ -175,8 +175,12 @@ class TestAlerts:
                 dt = (params or {}).get("data_type", "")
                 called["primary" if called["primary"] is None else "fallback"] = dt
                 if dt == "stock_news":
+                    # 用相对今天的时间，不能用硬编码日期：_fetch_announcements
+                    # 会按 days 窗口过滤（now - days），硬编码日期会随时间失效。
+                    from datetime import datetime, timedelta
+                    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
                     return FakeResp([
-                        {"id": 999, "title": "美团回购公告", "published": "2026-07-01 10:00:00", "link": "http://hk"},
+                        {"id": 999, "title": "美团回购公告", "published": recent, "link": "http://hk"},
                     ])
                 return FakeResp([])
             async def aclose(self): pass
