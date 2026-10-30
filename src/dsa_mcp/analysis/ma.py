@@ -1,57 +1,12 @@
 # -*- coding: utf-8 -*-
-"""MA calculator — ported from dSA analysis_tools.py
+"""MA calculator —— **薄 re-export**（2026-10-31 迁移到共享库 fin-indicators）
 
-Data dependency removed: accepts df (pd.DataFrame) as parameter."""
-import logging
-from typing import Optional, Any
-import pandas as pd
+函数实体已迁到 `fin_indicators.ma`（纯函数、无 IO 的中性指标库）。
+本模块只做 re-export，保持 dsa-mcp 内部 import 路径与**公开 MCP 工具契约**
+（`calculate_ma` 的返回 dict）不变。
 
-logger = logging.getLogger(__name__)
+⚠️ 不要在这里加业务逻辑 —— 共享库的准入规则见 fin-indicators/README.md。
+"""
+from fin_indicators.ma import calculate_ma  # noqa: F401
 
-
-def calculate_ma(symbol: str, df: pd.DataFrame, periods: Optional[str] = None) -> dict:
-    """Calculate moving averages for arbitrary periods from OHLCV DataFrame."""
-    if df is None or df.empty:
-        return {"error": f"No data for {symbol}"}
-
-    default_periods = [5, 10, 20, 30, 60, 120, 250]
-    if periods:
-        try:
-            requested = [int(p.strip()) for p in periods.split(",") if p.strip().isdigit()]
-            period_list = sorted(set(requested)) if requested else default_periods
-        except Exception:
-            period_list = default_periods
-    else:
-        period_list = default_periods
-
-    close = df["close"] if "close" in df.columns else df.get("收盘", df.iloc[:, 4])
-    current_price = float(close.iloc[-1])
-    result = {
-        "code": symbol,
-        "current_price": round(current_price, 2),
-        "data_points": len(df),
-        "ma": {},
-    }
-
-    for period in period_list:
-        if len(close) < period:
-            result["ma"][f"ma{period}"] = None
-            continue
-        ma_val = float(close.rolling(window=period).mean().iloc[-1])
-        bias = round((current_price - ma_val) / ma_val * 100, 2) if ma_val else None
-        result["ma"][f"ma{period}"] = {
-            "value": round(ma_val, 2),
-            "bias_pct": bias,
-            "price_above": current_price > ma_val,
-        }
-
-    ma_values = [v for v in result["ma"].values() if v is not None]
-    above_count = sum(1 for v in ma_values if v["price_above"])
-    result["above_ma_count"] = above_count
-    result["total_ma_count"] = len(ma_values)
-    result["ma_alignment"] = (
-        "多头排列" if above_count == len(ma_values)
-        else "空头排列" if above_count == 0
-        else f"混合({above_count}/{len(ma_values)}条均线上方)"
-    )
-    return result
+__all__ = ["calculate_ma"]

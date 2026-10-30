@@ -24,6 +24,8 @@ from enum import Enum
 import pandas as pd
 import numpy as np
 
+import fin_indicators  # 中性指标计算库（纯函数，无 IO）
+
 # 本地常量 (替代 dSA config)
 BIAS_THRESHOLD = 5.0
 
@@ -263,81 +265,42 @@ class StockTrendAnalyzer:
         return result
     
     def _calculate_mas(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算均线"""
+        """计算均线（实体在共享库 fin_indicators；本方法只保留列名契约）
+
+        ⚠️ MA60 在数据不足 60 根时用 MA20 顶替 —— 这是历史行为，
+           由 `ma_series(..., ma60_fallback=True)` 原样复现。
+        """
         df = df.copy()
-        df['MA5'] = df['close'].rolling(window=5).mean()
-        df['MA10'] = df['close'].rolling(window=10).mean()
-        df['MA20'] = df['close'].rolling(window=20).mean()
-        if len(df) >= 60:
-            df['MA60'] = df['close'].rolling(window=60).mean()
-        else:
-            df['MA60'] = df['MA20']  # 数据不足时使用 MA20 替代
+        mas = fin_indicators.ma_series(df, (5, 10, 20), ma60_fallback=True)
+        for col in ("MA5", "MA10", "MA20", "MA60"):
+            df[col] = mas[col]
         return df
 
     def _calculate_macd(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算 MACD 指标
+        """计算 MACD（实体在共享库 fin_indicators）
 
-        公式：
-        - EMA(12)：12日指数移动平均
-        - EMA(26)：26日指数移动平均
-        - DIF = EMA(12) - EMA(26)
-        - DEA = EMA(DIF, 9)
-        - MACD = (DIF - DEA) * 2
+        公式：DIF = EMA(12) - EMA(26)；DEA = EMA(DIF, 9)；BAR = (DIF - DEA) * 2
+        周期取自实例属性，保持与本类既有配置一致。
         """
         df = df.copy()
-
-        # 计算快慢线 EMA
-        ema_fast = df['close'].ewm(span=self.MACD_FAST, adjust=False).mean()
-        ema_slow = df['close'].ewm(span=self.MACD_SLOW, adjust=False).mean()
-
-        # 计算快线 DIF
-        df['MACD_DIF'] = ema_fast - ema_slow
-
-        # 计算信号线 DEA
-        df['MACD_DEA'] = df['MACD_DIF'].ewm(span=self.MACD_SIGNAL, adjust=False).mean()
-
-        # 计算柱状图
-        df['MACD_BAR'] = (df['MACD_DIF'] - df['MACD_DEA']) * 2
-
+        macd = fin_indicators.macd_series(
+            df, fast=self.MACD_FAST, slow=self.MACD_SLOW, signal=self.MACD_SIGNAL)
+        for col in ("MACD_DIF", "MACD_DEA", "MACD_BAR"):
+            df[col] = macd[col]
         return df
 
     def _calculate_rsi(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        计算 RSI 指标（Wilder's EMA / SMMA 口径）
+        """计算 RSI（实体在共享库 fin_indicators，**Wilder 平滑**）
 
-        公式：
-        - avg_gain / avg_loss 使用 ewm(alpha=1/period, adjust=False)
-        - RS = avg_gain / avg_loss
-        - RSI = 100 - (100 / (1 + RS))
+        ⚠️ 本类用 Wilder 口径（与通达信/同花顺一致）；
+           dsa-mcp 的**告警**用另一种 SMA 口径（rsi_sma_legacy），
+           两者数字不同是**刻意保留**的，不要统一。
         """
         df = df.copy()
-
-        for period in [self.RSI_SHORT, self.RSI_MID, self.RSI_LONG]:
-            # 计算价格变化
-            delta = df['close'].diff()
-
-            # 分离上涨和下跌
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-
-            # 使用 Wilder's EMA / SMMA 口径，与常见 RSI 图表工具保持一致。
-            avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-
-            # 计算 RS 和 RSI
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-
-            # 填充 NaN 值
-            rsi = rsi.fillna(50)  # 默认中性值
-
-            # 添加到 DataFrame
-            col_name = f'RSI_{period}'
-            df[col_name] = rsi
-
+        for period in (self.RSI_SHORT, self.RSI_MID, self.RSI_LONG):
+            df[f'RSI_{period}'] = fin_indicators.rsi_wilder(df, period)
         return df
-    
+
     def _analyze_trend(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
         分析趋势状态

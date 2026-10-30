@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 import yaml
 
+import fin_indicators  # 中性指标计算库（纯函数，无 IO）
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,31 +68,28 @@ def check_alert(
     if quote and isinstance(quote, dict):
         current_price = quote.get("price") or (quote.get("data") or {}).get("price")
 
-    # Pre-compute indicators
+    # Pre-compute indicators —— 实体在共享库 fin_indicators（纯函数，无 IO）
+    #
+    # ⚠️⚠️ **RSI 口径注意**：告警这里用的是 `rsi_sma_legacy`（SMA + 除零 hack），
+    #    **不是** 看板/`get_indicators` 用的 Wilder 口径。两套口径并存是刻意的：
+    #    统一会改变告警数值 → 告警历史不可比（已与 Chief 确认，见 fin-indicators/README）。
+    #    已知盲区：`rsi_sma_legacy_last` 的 "loss==0 → 50" 兜底使
+    #    单边上涨行情下 `rsi_overbought_70` 永不触发（既有缺陷，本次不改）。
     ma5 = None
     ma20 = None
     volume_ratio = None
     if kline_df is not None and not kline_df.empty and len(kline_df) >= 20:
-        close_series = close.astype(float)
-        vol_series = vol.astype(float)
-        ma5 = float(close_series.rolling(5).mean().iloc[-1])
-        ma20 = float(close_series.rolling(20).mean().iloc[-1])
-        avg_vol_5 = float(vol_series.tail(5).mean())
-        if avg_vol_5 > 0:
-            volume_ratio = float(vol_series.iloc[-1]) / avg_vol_5
+        mas = fin_indicators.ma_series(kline_df, (5, 20))
+        ma5 = float(mas['MA5'].iloc[-1])
+        ma20 = float(mas['MA20'].iloc[-1])
+        volume_ratio = fin_indicators.volume_stats(kline_df, short=5, long=10)['ratio_short']
         # MACD
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        dif = ema12 - ema26
-        dea = dif.ewm(span=9, adjust=False).mean()
-        macd_bar = (dif - dea) * 2
+        macd = fin_indicators.macd_series(kline_df)
+        dif = macd['MACD_DIF']
+        dea = macd['MACD_DEA']
         macd_death_cross = (dif.iloc[-2] >= dea.iloc[-2]) and (dif.iloc[-1] < dea.iloc[-1])
-        # RSI
-        delta = close_series.diff()
-        gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-        rsi = 100 - (100 / (1 + gain / loss.where(loss != 0, 0.1))) if loss.iloc[-1] > 0 else 50
-        rsi_val = float(rsi.iloc[-1])
+        # RSI（历史口径，见上面的口径注意）
+        rsi_val = fin_indicators.rsi_sma_legacy_last(kline_df, 14)
 
     for rule in rules:
         rid = rule.get("id", "")
@@ -115,7 +114,7 @@ def check_alert(
             reason = f"放量 {volume_ratio:.2f} 倍"
 
         elif rid == "price_break_20d_high" and kline_df is not None and not kline_df.empty and current_price:
-            high_20d = float(high.astype(float).iloc[-21:-1].max()) if len(high) >= 21 else None
+            high_20d = fin_indicators.high_low_n(high, n=20)['high']
             if high_20d and current_price > high_20d:
                 value = round(current_price, 2)
                 triggered = True
