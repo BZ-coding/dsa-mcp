@@ -20,6 +20,7 @@ import httpx
 import yaml
 
 # Ported modules
+import fin_indicators  # 中性指标库（含日K整形 bars_from_intraday）
 from dsa_mcp.analysis.trend import StockTrendAnalyzer, TrendAnalysisResult
 from dsa_mcp.analysis.ma import calculate_ma as _calc_ma
 from dsa_mcp.analysis.volume import get_volume_analysis as _calc_volume
@@ -106,50 +107,10 @@ async def _fetch_kline(symbol: str, days: int = 60) -> list[dict]:
     if not items:
         return []
 
-    pd_mod = _get_pd()
-    df = pd_mod.DataFrame(items)
-    if df.empty or "trade_time" not in df.columns:
-        return []
-
-    # 1) 日期分组用 raw_data 内的市场行情时间，不能用外层 trade_time。
-    #    外层 trade_time 是"采集时间"（离盘时段也在跑，5min 一条），
-    #    而离盘快照携带的是【上一交易日】的 OHLC —— 用它分组会把
-    #    昨日 high/low 算进今日。raw_data.raw.trade_time 才是市场时间。
-    df["mkt_time"] = pd_mod.to_datetime(
-        pd_mod.Series([_market_time(it) for it in items], index=df.index),
-        errors="coerce",
-    )
-    df["date"] = df["mkt_time"].dt.strftime("%Y-%m-%d")
-
-    # 2) 剔除脏 OHLC：腾讯港股在开盘前几笔返回 open/high/low=0。
-    #    直接 min/max 会让整日 low=0（实测 38/60 日被污染）。
-    for col in ("open", "high", "low"):
-        if col in df.columns:
-            df[col] = pd_mod.to_numeric(df[col], errors="coerce")
-
-    df = df.sort_values("mkt_time")
-
-    def _agg(g, day: str) -> dict:
-        valid = g[(g["high"] > 0) & (g["low"] > 0) & (g["open"] > 0)]
-        src = valid if len(valid) else g
-        row = {
-            "date": day,
-            "open": float(src["open"].iloc[0]) if len(valid) else float(g["price"].iloc[0]),
-            "high": float(src["high"].max()) if len(valid) else float(g["price"].max()),
-            "low": float(src["low"].min()) if len(valid) else float(g["price"].min()),
-            "close": float(g["price"].iloc[-1]),
-            # 逐笔快照的 volume 是【当日累计量】，按 sum 会重复累加（实测虚高 200 倍）。
-            # 日成交量应取当日累计量的最大值（即收盘时的累计值）。
-            "volume": float(g["volume"].max()) if "volume" in g.columns and g["volume"].notna().any() else 0.0,
-        }
-        return row
-
-    daily = [
-        _agg(g, day)
-        for day, g in df.groupby("date", sort=True)
-        if isinstance(day, str) and day
-    ]
-    return daily
+    # 整形逻辑已收进共享库（避免采集线/分析线各写一份 → 漂移）。
+    # 逐字节等价性由 fin-indicators/tests/test_bars.py 证明：
+    # 同一批 876 条真实快照 → 56 根日线，与迁移前本函数的输出完全相等。
+    return fin_indicators.bars_from_intraday(items)
 
 
 async def _fetch_quote(symbol: str) -> dict:
