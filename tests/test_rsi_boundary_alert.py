@@ -101,11 +101,65 @@ def test_only_rsi_fields_change():
         assert isinstance(r["signals"], list)
 
 
-def test_rule_yaml_operator_matches_code():
-    """rules.yaml 的 op 必须与代码硬编码的判定一致（2026-10-31 由 gte 改为 gt）。"""
+def test_rule_yaml_and_code_are_bidirectionally_consistent():
+    """N3：**双向交叉断言** —— YAML 声明 与 checker.py 实际比较运算必须语义一致。
+
+    旧的单向守卫只断言 YAML 侧（op == 'gt'、value == 70），
+    如果有人把代码改成 `>= 70`，测试仍然会绿 —— 只守了一半。
+    这里：
+      · 从 YAML 读 field / op / value（声明）
+      · 从 checker.py **AST 解析**出 `if rsi_val <op> <阈值>` 的真实运算（行为）
+      · 两侧互相比对，任一侧漂移都会红
+    """
+    import ast
     import yaml
+
+    # ── 声明侧：YAML ──
     rules = yaml.safe_load(open(ROOT / "src/dsa_mcp/alerts/rules.yaml"))
-    r = next(x for x in rules if x.get("id") == "rsi_overbought_70")
-    cond = r["conditions"][0]
-    assert cond["op"] == "gt", f"YAML 应为 gt（与代码 rsi_val > 70 对齐），got {cond['op']}"
-    assert float(cond["value"]) == 70.0
+    rule = next(x for x in rules if x.get("id") == "rsi_overbought_70")
+    cond = rule["conditions"][0]
+    yaml_field, yaml_op, yaml_value = cond["field"], cond["op"], float(cond["value"])
+
+    # ── 行为侧：AST 解析 checker.py ──
+    src_path = ROOT / "src/dsa_mcp/alerts/checker.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    import dsa_mcp.alerts.checker as checker_mod
+
+    OP_MAP = {ast.Gt: "gt", ast.GtE: "gte", ast.Lt: "lt", ast.LtE: "lte",
+              ast.Eq: "eq", ast.NotEq: "ne"}
+
+    def resolve(node):
+        """比较右值：常量直接取值；模块级常量名则从模块里取实际值。"""
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.Name):
+            return float(getattr(checker_mod, node.id))
+        return None
+
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        left = node.left
+        if not (isinstance(left, ast.Name) and left.id == "rsi_val"):
+            continue
+        for op_node, cmp_node in zip(node.ops, node.comparators):
+            op_name = OP_MAP.get(type(op_node))
+            value = resolve(cmp_node)
+            if op_name and value is not None:
+                found.append((op_name, value))
+
+    assert found, "在 checker.py 里没找到 `rsi_val` 的比较 —— AST 解析可能失效，请更新该测试"
+    assert len(found) == 1, f"预期恰好一处 rsi_val 比较，实际 {len(found)}: {found}"
+    code_op, code_value = found[0]
+
+    # ── 双向断言 ──
+    assert yaml_op == code_op, f"YAML op={yaml_op!r} 与代码实际运算 {code_op!r} 不一致"
+    assert yaml_value == code_value, f"YAML value={yaml_value} 与代码阈值 {code_value} 不一致"
+    assert yaml_field == checker_mod.RSI_FIELD, (
+        f"YAML field={yaml_field!r} 与常量 RSI_FIELD={checker_mod.RSI_FIELD!r} 不一致")
+    # 导出常量也必须与两侧一致（防"常量改了但代码没改"）
+    assert checker_mod.RSI_OVERBOUGHT_OP == yaml_op
+    assert float(checker_mod.RSI_OVERBOUGHT_THRESHOLD) == yaml_value
+    # 语义补充断言：必须是严格大于（=70.00 时不触发）
+    assert yaml_op == "gt", "rsi_overbought_70 必须是严格大于（RSI 恰为 70.00 时不触发）"

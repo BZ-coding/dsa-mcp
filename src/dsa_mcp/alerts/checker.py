@@ -18,6 +18,17 @@ import fin_indicators  # 中性指标计算库（纯函数，无 IO）
 
 logger = logging.getLogger(__name__)
 
+# ── RSI 超买判定参数（**唯一真源**，2026-10-31）──────────────────────────
+# ⚠️ 这三个值必须与 `alerts/rules.yaml` 里 `rsi_overbought_70` 的
+#    `conditions[0]`（field/op/value）保持一致。
+#    `tests/test_rule_yaml_operator_matches_code.py` 做**双向交叉断言**：
+#    既从本文件做 AST 解析读实际比较运算，也从 YAML 读声明，任一侧漂移都会红。
+#    （2026-10-31 前 YAML 写的是 gte、代码是严格大于，属于"声明与行为不一致"。）
+RSI_OVERBOUGHT_THRESHOLD = 70.0
+RSI_OVERBOUGHT_OP = "gt"          # gt = 严格大于（rsi_val > 阈值）
+RSI_FIELD = "rsi_14"
+
+
 
 def _load_rules(path: Optional[Path] = None) -> list:
     """Load alert rules from YAML."""
@@ -132,10 +143,10 @@ def check_alert(
                 reason = "MACD 死叉"
 
         elif rid == "rsi_overbought_70" and kline_df is not None and not kline_df.empty:
-            if rsi_val > 70:
+            if rsi_val > RSI_OVERBOUGHT_THRESHOLD:
                 value = round(rsi_val, 1)
                 triggered = True
-                reason = f"RSI {value} > 70, 超买"
+                reason = f"RSI {value} > {RSI_OVERBOUGHT_THRESHOLD:g}, 超买"
 
         elif rid == "ma5_below_ma20" and ma5 and ma20:
             if ma5 < ma20:
