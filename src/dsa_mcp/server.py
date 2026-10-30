@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -384,6 +385,26 @@ async def list_tools():
             },
         ),
         Tool(
+            name="get_indicators",
+            description=(
+                "Compute technical indicators for ONE symbol: MA5/MA20, MACD (DIF/DEA/bar, "
+                "death/golden cross), RSI (Wilder 6/12/24), 20-day high/low, MA5 bias. "
+                "RSI uses Wilder smoothing (same as 通达信/同花顺). "
+                "NOTE: dsa-mcp alert rules use a different legacy SMA RSI; values differ by design. "
+                "Single symbol only — there is intentionally no 'list all watched symbols' mode."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string",
+                               "description": "Stock/fund code, e.g. 002202. Single symbol only."},
+                    "days": {"type": "integer", "description": "Lookback days for K-line (default 60, 20-250)",
+                             "minimum": 20, "maximum": 250},
+                },
+                "required": ["symbol"],
+            },
+        ),
+        Tool(
             name="get_agent_prompt",
             description="Get an agent prompt template (port from dSA). Agent names: technical, intel, risk, portfolio, decision, decision_chat.",
             inputSchema={
@@ -495,6 +516,55 @@ async def call_tool(name: str, arguments: dict) -> list:
                 rules = yaml.safe_load(f)
             return [TextContent(type="text", text=json.dumps(rules or [], ensure_ascii=False))]
         return [TextContent(type="text", text=json.dumps([]))]
+
+    if name == "get_indicators":
+        # ⚠️ 设计约束（Chief 拍板）：**只查单个 symbol**，不提供枚举/批量接口 ——
+        #    否则工具列表就成了"当前监控持仓"的枚举器（持仓不暴露纪律）。
+        sym = str(arguments.get("symbol") or "").strip()
+        if not re.match(r"^[0-9A-Za-z.]{1,16}$", sym):
+            return [TextContent(type="text", text=json.dumps(
+                {"error": "symbol 格式非法：只允许数字/字母/点，长度 1–16"}, ensure_ascii=False))]
+        days = int(arguments.get("days") or 60)
+        days = max(20, min(250, days))
+        kline = await _fetch_kline(sym, days=days)
+        if not kline:
+            return [TextContent(type="text", text=json.dumps(
+                {"symbol": sym, "error": "no kline data from 8084"}, ensure_ascii=False))]
+        pd = _get_pd()
+        df = pd.DataFrame(kline)
+        last = float(df["close"].iloc[-1])
+        ma = fin_indicators.ma_series(df, (5, 20))
+        ma5 = float(ma["MA5"].iloc[-1]) if pd.notna(ma["MA5"].iloc[-1]) else None
+        ma20 = float(ma["MA20"].iloc[-1]) if pd.notna(ma["MA20"].iloc[-1]) else None
+        macd = fin_indicators.macd_series(df)
+        dif, dea, bar = macd["MACD_DIF"], macd["MACD_DEA"], macd["MACD_BAR"]
+        death_cross = golden_cross = None
+        if len(df) >= 2:
+            death_cross = bool((dif.iloc[-2] >= dea.iloc[-2]) and (dif.iloc[-1] < dea.iloc[-1]))
+            golden_cross = bool((dif.iloc[-2] <= dea.iloc[-2]) and (dif.iloc[-1] > dea.iloc[-1]))
+        hl = fin_indicators.high_low_n(df, df, n=20)
+        out = {
+            "symbol": sym,
+            "data_as_of": kline[-1]["date"],
+            "bars": len(kline),
+            "close": round(last, 3),
+            "ma": {"ma5": round(ma5, 3) if ma5 is not None else None,
+                   "ma20": round(ma20, 3) if ma20 is not None else None,
+                   "bias_ma5_pct": round((last - ma5) / ma5 * 100, 2) if ma5 else None},
+            "macd": {"dif": round(float(dif.iloc[-1]), 4),
+                     "dea": round(float(dea.iloc[-1]), 4),
+                     "bar": round(float(bar.iloc[-1]), 4),
+                     "death_cross": death_cross, "golden_cross": golden_cross},
+            "rsi": {"rsi6": round(float(fin_indicators.rsi_wilder(df, 6).iloc[-1]), 2),
+                    "rsi12": round(float(fin_indicators.rsi_wilder(df, 12).iloc[-1]), 2),
+                    "rsi24": round(float(fin_indicators.rsi_wilder(df, 24).iloc[-1]), 2)},
+            "rsi_method": "wilder",
+            "levels": {"high_20d": round(hl["high"], 3) if hl["high"] is not None else None,
+                       "low_20d": round(hl["low"], 3) if hl["low"] is not None else None,
+                       "at_20d_high": bool(hl["high"] is not None and last >= hl["high"]),
+                       "at_20d_low": bool(hl["low"] is not None and last <= hl["low"])},
+        }
+        return [TextContent(type="text", text=json.dumps(out, ensure_ascii=False))]
 
     if name == "check_alert":
         rule_id = arguments.get("rule_id")
