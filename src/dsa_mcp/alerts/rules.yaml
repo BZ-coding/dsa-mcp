@@ -44,10 +44,15 @@
 - id: rsi_overbought_70
   name: RSI > 70 超买
   description: RSI 进入超买区域, 警惕回调
+  # ⚠️ 2026-10-31：op 由 gte 改为 gt，与 checker.py 的硬编码判定 `rsi_val > 70` 对齐。
+  #    原先写 gte（>=70）而代码是严格大于，两者差一个边界点（RSI 恰好 == 70 时）。
+  #    选择"改数据不改行为"：YAML 是文档、代码是既有行为，改数据风险最低。
+  #    边界影响：RSI 恰为 70.00 时**不触发**（改前 YAML 语义下会触发，但代码从未按 YAML 执行）。
+  #    实测：当前 3 个监控标的 RSI 末值均 < 70，无翻转。
   severity: low
   conditions:
     - field: rsi_14
-      op: gte
+      op: gt
       value: 70
 
 - id: ma5_below_ma20

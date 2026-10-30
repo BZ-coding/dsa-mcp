@@ -70,11 +70,16 @@ def check_alert(
 
     # Pre-compute indicators —— 实体在共享库 fin_indicators（纯函数，无 IO）
     #
-    # ⚠️⚠️ **RSI 口径注意**：告警这里用的是 `rsi_sma_legacy`（SMA + 除零 hack），
-    #    **不是** 看板/`get_indicators` 用的 Wilder 口径。两套口径并存是刻意的：
-    #    统一会改变告警数值 → 告警历史不可比（已与 Chief 确认，见 fin-indicators/README）。
-    #    已知盲区：`rsi_sma_legacy_last` 的 "loss==0 → 50" 兜底使
-    #    单边上涨行情下 `rsi_overbought_70` 永不触发（既有缺陷，本次不改）。
+    # ⚠️⚠️ **RSI 口径注意**：告警这里用的是 `rsi_sma`（SMA 平滑），
+    #    **不是** 看板/`get_indicators` 用的 Wilder 平滑。两套口径**都正确**，
+    #    区别只在平滑方式（SMA vs Wilder），边界处理完全一致。
+    #
+    #    📌 **2026-10-31 口径修正**：此前这里是 `rsi_sma_legacy`，带除零 hack
+    #    （`loss.where(loss != 0, 0.1)`）+ 末值 "loss==0 → 50" 兜底，
+    #    导致**单边上涨行情下 RSI 恒为 50 → `rsi_overbought_70` 永不触发**（漏报）。
+    #    已改为标准定义：avg_loss==0 → 100 / avg_gain==0 → 0 / 两者都 0 → 50。
+    #    → **2026-10-31 之前的告警历史里 RSI 值基于缺陷口径，不可与之后的记录直接比较。**
+    #    影响面实测：3 个有日线的标的、227 个有效交易日，新旧值 **0 天不同**。
     ma5 = None
     ma20 = None
     volume_ratio = None
@@ -89,7 +94,7 @@ def check_alert(
         dea = macd['MACD_DEA']
         macd_death_cross = (dif.iloc[-2] >= dea.iloc[-2]) and (dif.iloc[-1] < dea.iloc[-1])
         # RSI（历史口径，见上面的口径注意）
-        rsi_val = fin_indicators.rsi_sma_legacy_last(kline_df, 14)
+        rsi_val = fin_indicators.rsi_sma_last(kline_df, 14)
 
     for rule in rules:
         rid = rule.get("id", "")
