@@ -168,6 +168,8 @@ def append_history(ts: str, groups: list[tuple[str, list]]) -> None:
                         "name": s.get("name") or s["rule_id"],
                         "reason": s.get("reason", ""),
                         "sig_key": _signal_value(s),
+                        # 每条信号独立的触发时间（缺省沿用整轮 ts，兼容旧记录）
+                        "ts": s.get("ts") or ts,
                     }
                     for s in sigs
                 ],
@@ -552,6 +554,10 @@ def poll_once(verbose: bool = True) -> int:
                 continue
 
             signals = result.get("signals", [])
+            # 每条信号记录它被检测到的时间（用于 App 里逐条显示）
+            _seen_at = datetime.now().isoformat(timespec="seconds")
+            for _sig in signals:
+                _sig.setdefault("ts", _seen_at)
             prev_state = state.get(sym, {})
 
             # 8084 / dsa-mcp 偶发返回空 signals 时不要立即清空 state。
