@@ -213,6 +213,38 @@ def trading_now() -> bool:
 # Push (hermes send)
 # ──────────────────────────────────────────────────
 
+def _ntfy_topic() -> str:
+    try:
+        return (HERMES_HOME / "ntfy_topic").read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def push_ntfy(msg: str) -> bool:
+    """免费 ntfy 推送（手机装 ntfy App 订阅同名 topic）。"""
+    topic = _ntfy_topic()
+    if not topic:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=msg.encode("utf-8"),
+            headers={
+                "Title": "DSH Alert",
+                "Tags": "bell",
+                "Priority": "high",
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception as e:
+        print(f"[warn] ntfy push {e}", file=sys.stderr)
+        return False
+
+
 def push_feishu(msg: str) -> bool:
     """走 hermes send 推到飞书."""
     try:
@@ -618,6 +650,7 @@ def poll_once(verbose: bool = True) -> int:
         if push_groups:
             msg = _build_combined_msg([(sym, sigs) for sym, sigs, _ in push_groups])
             ok = push_feishu(msg)
+            push_ntfy(msg)
             if ok:
                 pushed_ts = datetime.now().isoformat(timespec="seconds")
                 # Phase A: 先 append 推送历史 (无论如何)
