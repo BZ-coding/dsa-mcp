@@ -7,7 +7,7 @@
 
 - id: bias_ma5_over_5pct
   name: 乖离率超5%
-  description: 收盘价相对 MA5 乖离率 > 5%, 不追高
+  description: 正向乖离：收盘价高于 MA5 达 +5% 以上, 勿追高（负乖离=回调信号，不触发本规则，2026-11-09 修复）
   severity: low
   conditions:
     - field: bias_ma5

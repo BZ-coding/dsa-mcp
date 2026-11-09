@@ -7,6 +7,7 @@ Data source: ALL from 8084 MCP (passed in as parameters).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -28,6 +29,21 @@ RSI_OVERBOUGHT_THRESHOLD = 70.0
 RSI_OVERBOUGHT_OP = "gt"          # gt = 严格大于（rsi_val > 阈值）
 RSI_FIELD = "rsi_14"
 
+
+
+CUSTOM_RULES_PATH = Path.home() / ".hermes" / "custom_alert_rules.json"
+
+
+def _load_custom_rules() -> list:
+    """App 自定义告警规则（JSON）。失败返回空，不影响内置规则。"""
+    try:
+        if not CUSTOM_RULES_PATH.exists():
+            return []
+        data = json.loads(CUSTOM_RULES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        logger.warning("读取自定义告警规则失败: %s", exc)
+        return []
 
 
 def _load_rules(path: Optional[Path] = None) -> list:
@@ -76,8 +92,14 @@ def check_alert(
         low = kline_df["low"] if "low" in kline_df.columns else kline_df.iloc[:, 3]
 
     current_price = None
+    change_pct_val = None
     if quote and isinstance(quote, dict):
-        current_price = quote.get("price") or (quote.get("data") or {}).get("price")
+        current_price = (
+            quote.get("price")
+            or quote.get("last")
+            or (quote.get("data") or {}).get("price")
+        )
+        change_pct_val = quote.get("change_pct")
 
     # Pre-compute indicators —— 实体在共享库 fin_indicators（纯函数，无 IO）
     #
@@ -94,6 +116,8 @@ def check_alert(
     ma5 = None
     ma20 = None
     volume_ratio = None
+    rsi_val = None
+    bias_val = None
     if kline_df is not None and not kline_df.empty and len(kline_df) >= 20:
         mas = fin_indicators.ma_series(kline_df, (5, 20))
         ma5 = float(mas['MA5'].iloc[-1])
@@ -106,6 +130,8 @@ def check_alert(
         macd_death_cross = (dif.iloc[-2] >= dea.iloc[-2]) and (dif.iloc[-1] < dea.iloc[-1])
         # RSI（历史口径，见上面的口径注意）
         rsi_val = fin_indicators.rsi_sma_last(kline_df, 14)
+        if current_price and ma5 and ma5 > 0:
+            bias_val = (current_price - ma5) / ma5 * 100
 
     for rule in rules:
         rid = rule.get("id", "")
@@ -120,9 +146,13 @@ def check_alert(
         if rid == "bias_ma5_over_5pct" and current_price and ma5 and ma5 > 0:
             bias = (current_price - ma5) / ma5 * 100
             value = round(bias, 2)
-            if abs(bias) > 5.0:
+            # 2026-11-09 修复：原 `abs(bias) > 5.0` 把 -5.01% 负乖离也当成"超5%"推送
+            # （11-09 美团 13:52 跌破 MA5 至 -5.01% 被报成"乖离率超5%"）。
+            # 负乖离 = 跌破均线的回调信号，不是追高风险；本规则只管**正向**乖离
+            # （价格远在 MA5 上方）。深度回调类提醒若将来需要，应另立规则而非共用本条。
+            if bias > 5.0:
                 triggered = True
-                reason = f"乖离率 {bias:+.2f}% 超 5%"
+                reason = f"乖离率 {bias:+.2f}% 超 +5%（价格远高于 MA5，勿追高）"
 
         elif rid == "volume_breakout_3x" and volume_ratio and volume_ratio > 3.0:
             value = round(volume_ratio, 2)
@@ -164,6 +194,51 @@ def check_alert(
                 "source": "technical" if current_price is not None or volume_ratio is not None else "unknown",
                 "link": None,
             })
+
+    # ── App 自定义规则（通用条件求值） ──
+    custom_values = {
+        "price": current_price,
+        "change_pct": change_pct_val,
+        "bias_ma5_pct": bias_val,
+        "rsi_14": rsi_val,
+        "volume_ratio": volume_ratio,
+        "ma5": ma5,
+        "ma20": ma20,
+    }
+    for crule in _load_custom_rules():
+        if not crule.get("enabled", True):
+            continue
+        rule_symbol = str(crule.get("symbol") or "")
+        if rule_symbol and rule_symbol != symbol:
+            continue
+        field = crule.get("field")
+        op = crule.get("op")
+        threshold = crule.get("value")
+        value = custom_values.get(field)
+        if value is None or threshold is None:
+            continue
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            continue
+        hit = (
+            (op == "gt" and value > threshold)
+            or (op == "gte" and value >= threshold)
+            or (op == "lt" and value < threshold)
+            or (op == "lte" and value <= threshold)
+        )
+        if not hit:
+            continue
+        label = crule.get("field_label") or field
+        signals.append({
+            "rule_id": f"custom:{crule.get('id', '')}",
+            "severity": crule.get("severity", "low"),
+            "name": crule.get("name") or f"{label} {op} {threshold:g}",
+            "value": round(value, 4),
+            "reason": f"{label} {value:.4g} {op} {threshold:g}",
+            "source": "custom",
+            "link": None,
+        })
 
     # ── Semantic rules (announcement title matching) ──
     _target_rule = rule_id or ""
