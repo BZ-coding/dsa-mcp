@@ -64,6 +64,28 @@ def test_tool_registered():
         assert bad not in t.inputSchema["properties"], f"不应有 {bad} 参数"
 
 
+def _8084_reachable() -> bool:
+    """test_ok / test_days_clamped 需要真实 8084 /api/v1/history（CI 上没有）。
+
+    模仿本仓既有模式（alert_daemon / daily_recap 的 "not deployed → skip"）：
+    服务不可达就 skip，让 CI 只跑纯逻辑部分（schema / 校验 / 错误分支）。
+    """
+    import os
+    import socket
+    from urllib.parse import urlparse
+    base = os.environ.get("FDS_BASE_URL", "http://localhost:8084")
+    u = urlparse(base)
+    try:
+        with socket.create_connection((u.hostname, u.port or 80), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+_NO_8084 = pytest.mark.skipif(not _8084_reachable(), reason="8084 (FDS_BASE_URL) not reachable — data-dependent tests run only where the service exists (local/dev)")
+
+
+@_NO_8084
 def test_ok():
     from dsa_mcp.server import call_tool
     r = run(call_tool("get_indicators", {"symbol": "002202"}))
@@ -100,6 +122,7 @@ def test_no_data_returns_error():
     assert "error" in d, d
 
 
+@_NO_8084
 def test_days_clamped():
     from dsa_mcp.server import call_tool
     a = json.loads(run(call_tool("get_indicators", {"symbol": "002202", "days": 9999}))[0].text)
