@@ -13,11 +13,12 @@ authors = [
     { name = "zhangsheng377" },
 ]
 dependencies = [
-    "mcp>=1.0",
+    "mcp>=1.0,<2",  # mcp 2.x removed Server.list_tools() —— 2026-10-28 CI 被 2.3.0 打挂
     "pandas>=2.0",
     "numpy>=1.24",
     "pyyaml>=6.0",
     "httpx>=0.27",  # for calling 8084 MCP from 8087
+    "fin-indicators @ git+https://github.com/BZ-coding/fin-indicators.git",
 ]
 
 [project.optional-dependencies]
