@@ -247,17 +247,30 @@ async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
     if not items:
         return []
 
-    # Filter by recency (time field varies: announcement_time / published)
+    # Filter by recency (time field varies: announcement_time / published_date / published)
+    #
+    # 2026-11-12 港股公告出口修复：
+    #   8084 港股分支现在返回归一字段 `published_date`（'YYYY-MM-DD'，日期粒度），
+    #   而 `published` 原值在库里混有 unix 秒 / ISO+08:00 / 空格分隔 4 种格式。
+    #   旧代码 `str(ts)[:10] >= cutoff` 对 unix 秒会算出 '1762000000' → 被误判为过期。
+    #   现在优先用日期粒度字段，统一按 'YYYY-MM-DD' 比较。
     from datetime import datetime, timedelta
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()[:10]
     out: list[dict] = []
     for it in items:
-        ts = it.get("announcement_time") or it.get("published") or ""
-        if str(ts)[:10] >= cutoff:
+        ts = (it.get("announcement_time") or it.get("published_date")
+              or it.get("published_at") or it.get("published") or "")
+        ts = str(ts)
+        # 归一到日期粒度再比较（unix 秒等非日期格式一律不参与判定）
+        if len(ts) >= 10 and ts[4] == "-" and ts[7] == "-":
+            day = ts[:10]
+        else:
+            day = ""
+        if day and day >= cutoff:
             out.append({
                 "id": it.get("id"),
                 "title": it.get("title", ""),
-                "announcement_time": ts,
+                "announcement_time": day or ts,
                 "link": it.get("link", ""),
                 "source": primary_type,  # 标记 source (announcement / stock_news) 便于审计
             })
