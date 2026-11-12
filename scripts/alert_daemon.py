@@ -354,9 +354,15 @@ def _signal_value(sig: dict) -> str:
     return f"price:{rid}"
 
 
-# 连续 N 次轮询均未见某 signal 才视为真正消失。防 8084 短暂空响应导致
-# state 被清空、下一轮同一信号被当成“新事件”重复推送。
-SIGNAL_MISSING_POLLS_TO_EXPIRE = 3
+# 连续 N 次轮询均未见某 signal，其 state 最多保留 N 轮后丢弃。
+#
+# ⚠️ 2026-11-12 修复（phase6 审计）：
+#   此前此处 SIGNAL_MISSING_POLLS_TO_EXPIRE = 3，**只被日志引用**；
+#   真实过期判定在 _reconcile_signal_state 里是另一处硬编码 `>= 100`，
+#   而 [hold] 日志又拿 3 当分母 → 「判断用 100、日志写 3」两套值，纯误导。
+#   现在统一为**同一个常量**：行为判定与日志分母都引用它。
+#   行为阈值保持 100 不变（2026-10-15 起的「永不 expire、仅防 state 无限增长」语义）。
+SIGNAL_MISSING_POLLS_TO_EXPIRE = 100
 # 2026-10-15: 加 60min cooldown 窗口. 同 key 信号 60min 内最多推一次.
 # 解决 10-15 bug: 11:21 推后 13:12~13:22 dsa_mcp_call 报空, missing_count=3
 # 把 bias_ma5 从 state expire 掉, 13:30 恢复后 prev_meta 丢失 → 重推 3 次.
@@ -384,14 +390,26 @@ def _is_in_cooldown(prev_meta: dict | None, now: "datetime | None" = None) -> bo
 def _reconcile_signal_state(
     prev_state: dict,
     signals: list,
-    missing_threshold: int = SIGNAL_MISSING_POLLS_TO_EXPIRE,
+    missing_threshold: int | None = None,
 ) -> tuple[list, dict]:
-    """合并本轮 signals 与上轮状态，返回 (to_push, next_state).
+    """合并本轮 signals 与上轮状态，返回 (to_push, next_state)。
 
     新信号立即进入 to_push；已知信号保留 pushed_at。暂时缺失的信号只增加
-    missing_count，连续 missing_threshold 轮缺失才删除，避免数据源抖动造成
-    reset → re-trigger → spam。
+    missing_count（**不删除 state**），避免数据源抖动造成 reset → re-trigger → spam。
+
+    过期语义（2026-10-15 起）：missing_count 永不导致 state 立刻被删，只有连续缺失
+    达到 SIGNAL_MISSING_POLLS_TO_EXPIRE(100) 轮才丢弃，防止 state 无限增长。
+    该常量同时是日志里 (N/100) 的分母 —— 判断与日志同源（2026-11-12 统一）。
+
+    missing_threshold 为兼容参数：只能**延长**保留窗口，不能缩短到安全下限以下
+    （传 3 依旧按 100 轮保留，见 tests/test_alert_daemon_debounce.py）。
     """
+    expire_after = SIGNAL_MISSING_POLLS_TO_EXPIRE
+    if missing_threshold is not None:
+        try:
+            expire_after = max(int(missing_threshold), SIGNAL_MISSING_POLLS_TO_EXPIRE)
+        except (TypeError, ValueError):
+            expire_after = SIGNAL_MISSING_POLLS_TO_EXPIRE
     to_push = []
     next_state: dict = {}
     seen_keys: set[tuple[str, str]] = set()
@@ -463,8 +481,9 @@ def _reconcile_signal_state(
             # 2026-10-15: 改 missing_count 永远不 expire. 旧逻辑 3 轮 missing
             # (15min) 后从 state 删除 → 信号重新出现时 prev_meta 丢失 → 重推.
             # 新策略: 保留 meta (包含 pushed_at) → cooldown gate 在重新出现时
-            # 仍能拦住. 极端情况下 (几天没出现) 上限 100 轮 missing 才清理, 避免 state 无限增长.
-            if missing_count >= 100:
+            # 仍能拦住. 极端情况下 (几天没出现) 上限 SIGNAL_MISSING_POLLS_TO_EXPIRE 轮
+            # missing 才清理, 避免 state 无限增长.  ⚠️ 2026-11-12: 原硬编码 100, 现引用常量.
+            if missing_count >= expire_after:
                 continue
             held = dict(meta)
             held["missing_count"] = missing_count
