@@ -246,7 +246,9 @@ def generate_recap(today: str | None = None, verbose: bool = True) -> str:
         tmp.rename(LOG_FILE)
 
         if verbose:
-            print(f"[recap] wrote {LOG_FILE} ({len(content)} bytes, {len(signals)} signals)")
+            print(f"[recap] wrote {LOG_FILE} "
+                  f"({len(content)} chars / {len(content.encode('utf-8'))} bytes, "
+                  f"{len(signals)} signals)")
 
         return content
 
