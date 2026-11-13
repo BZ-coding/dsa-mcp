@@ -269,6 +269,11 @@ async def _fetch_announcements(symbol: str, days: int = 90) -> list[dict]:
         if day and day >= cutoff:
             out.append({
                 "id": it.get("id"),
+                # 稳定业务身份：8084 的 announcement_data 自 2026-11-12 起提供
+                # announcement_id（形如 cninfo:1225666696）。**必须透传**——
+                # 漏掉它，下游只能用「行号 id」做去重键，而行号在
+                # news_data 30 天清理后重采会变 → 同一份公告被当成新事件重推。
+                "announcement_id": it.get("announcement_id"),
                 "title": it.get("title", ""),
                 "announcement_time": day or ts,
                 "link": it.get("link", ""),

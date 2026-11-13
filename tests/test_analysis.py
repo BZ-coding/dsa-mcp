@@ -143,10 +143,16 @@ class TestAlerts:
         """Phase 5c: 同一 rule 命中多条公告 → 每条 announcement_id 独立 signal"""
         from dsa_mcp.alerts.checker import check_alert
         # keywords: 重大资产重组 / 收购 / 合并 / 股份回购 / 股权激励 / 股东大会决议 / 停牌 / 复牌 / 担保
+        # ⚠️ 2026-11-13：去重身份改为**稳定业务身份**（announcement_id → link → 行号 id）。
+        # 行号 id 在 news_data 30 天清理后重采会变 → 同一份公告会被当成新事件重推，
+        # 所以这里必须给业务身份（announcement_id / link），断言也按业务身份。
         anns = [
-            {"id": 100, "title": "关于为子公司提供担保的公告", "announcement_time": "2026-06-30", "link": "http://a"},
-            {"id": 101, "title": "关于公司股份回购的公告", "announcement_time": "2026-06-29", "link": "http://b"},
-            {"id": 102, "title": "关于召开股东大会决议的通知", "announcement_time": "2026-06-28", "link": "http://c"},
+            {"id": 100, "announcement_id": "cninfo:9001", "title": "关于为子公司提供担保的公告",
+             "announcement_time": "2026-06-30", "link": "http://a"},
+            {"id": 101, "announcement_id": "cninfo:9002", "title": "关于公司股份回购的公告",
+             "announcement_time": "2026-06-29", "link": "http://b"},
+            {"id": 102, "announcement_id": "cninfo:9003", "title": "关于召开股东大会决议的通知",
+             "announcement_time": "2026-06-28", "link": "http://c"},
         ]
         r = check_alert("000001", {}, None, announcements=anns)
         assert r["triggered"]
@@ -154,7 +160,19 @@ class TestAlerts:
         # 3 条公告 → 3 条 major_event signals
         assert len(major_sigs) == 3, f"expected 3, got {len(major_sigs)}"
         ann_ids = {s.get("announcement_id") for s in major_sigs}
-        assert ann_ids == {100, 101, 102}, f"ann_ids mismatch: {ann_ids}"
+        assert ann_ids == {"cninfo:9001", "cninfo:9002", "cninfo:9003"}, f"ann_ids mismatch: {ann_ids}"
+
+    def test_semantic_announcement_falls_back_to_link_when_no_stable_id(self):
+        """没有 announcement_id 时退到 link（表上 UNIQUE，跨源稳定），而非行号。"""
+        from dsa_mcp.alerts.checker import check_alert
+        anns = [
+            {"id": 555, "title": "关于为子公司提供担保的公告",
+             "announcement_time": "2026-06-30", "link": "http://stable-link"},
+        ]
+        r = check_alert("000001", {}, None, announcements=anns)
+        sigs = [s for s in r["signals"] if s["rule_id"] == "major_event"]
+        assert sigs, "应命中 major_event"
+        assert sigs[0]["announcement_id"] == "http://stable-link", sigs[0]["announcement_id"]
 
     def test_semantic_announcement_hk_fallback(self):
         """Phase 7: 港股优先 HKEX，空结果时 fallback stock_news"""

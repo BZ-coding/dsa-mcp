@@ -293,7 +293,15 @@ def check_alert(
                     "source": "announcement",
                     "link": m["ann"].get("link"),
                     "announcement_time": m["ann"].get("announcement_time"),
-                    "announcement_id": m["ann"].get("id") or m["ann"].get("announcement_id"),
+                    # 去重身份必须是**稳定业务身份**，不能是行号：
+                    #   announcement_id（8084 稳定身份，形如 cninfo:1225666696）
+                    #   → link（news_data / announcement_data 上 UNIQUE，跨源也稳定）
+                    #   → id（行号，仅兜底：清理重采后行号会变，同一公告会被当新事件重推）
+                    "announcement_id": (
+                        m["ann"].get("announcement_id")
+                        or m["ann"].get("link")
+                        or m["ann"].get("id")
+                    ),
                 })
 
     # ── Fund flow rules (main_inflow / main_outflow surge) ──
